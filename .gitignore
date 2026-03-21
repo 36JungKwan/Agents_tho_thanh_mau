@@ -1,0 +1,35 @@
+# --- Môi trường ảo (Virtual Environments) ---
+venv/
+.venv/
+env/
+
+# --- File cấu hình bảo mật (CỰC KỲ QUAN TRỌNG) ---
+.env
+
+# --- Thư mục chứa Database & Data của dự án ---
+# Không đưa Vector DB lên Git vì nó rất nặng và sinh ra liên tục
+chroma_db/
+# Không đưa sách PDF gốc lên Git (tránh vi phạm bản quyền và nặng kho lưu trữ)
+data_sach/*.pdf
+
+# --- File tạm thời sinh ra trong quá trình chạy (API Upload File) ---
+temp_*
+
+# --- Python Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- OS & IDE (Hệ điều hành & Trình soạn thảo) ---
+.DS_Store
+.vscode/
+.idea/
+
+*.env
+*.pdf
+*.bin
+*.sqlite3
+*.jon
+*.pyc
+*.ipynb
+
