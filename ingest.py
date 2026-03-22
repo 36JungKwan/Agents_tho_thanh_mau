@@ -1,8 +1,10 @@
 import os
+import glob
+import gc
 from sqlalchemy.orm import Session
 from database import SessionLocal
 import models
-import glob
+from PyPDF2 import PdfReader, PdfWriter
 
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
 from llama_index.readers.docling import DoclingReader
@@ -31,74 +33,100 @@ chroma_collection = db_chroma.get_or_create_collection("thomau_collection")
 # Kết nối ChromaDB với LlamaIndex
 vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
+index = VectorStoreIndex.from_vector_store(vector_store, embed_model=Settings.embed_model)
 
 # ---------------------------------------------------------
 # 2. HÀM XỬ LÝ CHÍNH
 # ---------------------------------------------------------
-
 def ingest_pdf(file_path: str, title: str):
     db: Session = SessionLocal()
     
-    # 1. Kiểm tra sách trùng lặp
     existing_doc = db.query(models.Document).filter(models.Document.title == title).first()
     if existing_doc:
-        print(f"⏩ Sách '{title}' đã tồn tại trong Database. Bỏ qua nạp lại...")
+        print(f"Sách '{title}' đã tồn tại trong Database. Bỏ qua nạp lại...")
         db.close()
         return
 
     print(f"\n--- Đang xử lý sách: {title} ---")
-
-    # 2. Cấu hình đọc PDF, chỉnh lại OCR để không bị tràn RAM
-    pipeline_options = PdfPipelineOptions(
-        do_ocr=True, 
-        num_threads=1 # Ép nó chỉ được chạy 1 luồng duy nhất (tuần tự từng trang một)
-    ) 
-    reader = DoclingReader(pipeline_options=pipeline_options)
     
-    llama_docs = reader.load_data(file_path=file_path)
-    parser = SentenceSplitter(chunk_size=512, chunk_overlap=50)
-    nodes = parser.get_nodes_from_documents(llama_docs)
-    
-    # 3. Lưu thông tin sách vào PostgreSQL (owner_id = None nghĩa là Sách chung)
-    new_doc = models.Document(
-        title=title, 
-        source_url=file_path,
-        owner_id=None # <-- ĐIỂM QUAN TRỌNG: Sách phổ thông
-    )
+    # 1. Tạo bản ghi Document gốc trong DB
+    new_doc = models.Document(title=title, source_url=file_path, owner_id=None)
     db.add(new_doc)
     db.commit()
     db.refresh(new_doc)
-    
-    print(f"Đã chia thành {len(nodes)} đoạn văn nhỏ. Đang lưu vào Database...")
-    
-    # 4. Lưu từng Chunk vào Postgres & ChromaDB
-    for i, node in enumerate(nodes):
 
-        page_str = node.metadata.get("page_label") or node.metadata.get("page_number")
-        page_num = int(page_str) if page_str and str(page_str).isdigit() else None
+    # 2. Cấu hình OCR chạy 1 luồng
+    pipeline_options = PdfPipelineOptions(do_ocr=True, num_threads=1) 
+    reader = DoclingReader(pipeline_options=pipeline_options)
+    parser = SentenceSplitter(chunk_size=512, chunk_overlap=50)
 
-        # Lưu Text gốc vào PostgreSQL
-        new_chunk = models.DocumentChunk(
-            document_id=new_doc.id,
-            chunk_text=node.text,
-            chunk_index=i,
-            page_number=page_num
-        )
-        db.add(new_chunk)
-        db.commit()
-        db.refresh(new_chunk)
+    # 3. ĐỌC FILE PDF GỐC ĐỂ CHIA NHỎ
+    pdf_reader = PdfReader(file_path)
+    total_pages = len(pdf_reader.pages)
+    chunk_size = 5 # CHỈNH Ở ĐÂY: Xử lý 5 trang 1 lần (Máy yếu có thể giảm xuống 3)
+
+    print(f"Sách có tổng cộng {total_pages} trang. Bắt đầu tiến trình OCR an toàn...")
+
+    chunk_index_counter = 0
+
+    # Vòng lặp cắt file PDF
+    for start_page in range(0, total_pages, chunk_size):
+        end_page = min(start_page + chunk_size, total_pages)
+        temp_filename = f"./temp_ocr_{start_page}_{end_page}.pdf"
         
-        # Gắn thẻ metadata vào ChromaDB để AI A phục vụ việc LỌC
-        node.metadata["pg_chunk_id"] = new_chunk.id
-        node.metadata["document_title"] = title
-        node.metadata["page_number"] = page_num
-        node.metadata["owner"] = "all" # DÁN NHÃN SÁCH CHUNG VÀO VECTOR
+        # Cắt và lưu 5 trang ra một file tạm
+        pdf_writer = PdfWriter()
+        for i in range(start_page, end_page):
+            pdf_writer.add_page(pdf_reader.pages[i])
+        
+        with open(temp_filename, "wb") as f:
+            pdf_writer.write(f)
+            
+        print(f"  -> Đang quét OCR từ trang {start_page + 1} đến {end_page}...")
+        
+        try:
+            # Cho Docling đọc file tạm (rất nhẹ, không bao giờ sập)
+            llama_docs = reader.load_data(file_path=temp_filename)
+            nodes = parser.get_nodes_from_documents(llama_docs)
+            
+            for node in nodes:
+                # Tính toán lại số trang gốc cho chuẩn xác
+                page_str = node.metadata.get("page_label") or node.metadata.get("page_number")
+                page_num = int(page_str) if page_str and str(page_str).isdigit() else 1
+                real_page_number = start_page + page_num
+                
+                # Lưu Text vào PostgreSQL
+                new_chunk = models.DocumentChunk(
+                    document_id=new_doc.id,
+                    chunk_text=node.text,
+                    chunk_index=chunk_index_counter,
+                    page_number=real_page_number
+                )
+                db.add(new_chunk)
+                db.commit()
+                db.refresh(new_chunk)
+                
+                # Gắn Metadata để LlamaIndex tìm kiếm
+                node.metadata["pg_chunk_id"] = new_chunk.id
+                node.metadata["document_title"] = title
+                node.metadata["page_number"] = real_page_number
+                node.metadata["owner"] = "all"
+                
+                chunk_index_counter += 1
 
-    # Bước E: Nhúng Vector và lưu vào ChromaDB
-    print("Đang tạo Vector và lưu vào ChromaDB...")
-    VectorStoreIndex(nodes, storage_context=storage_context)
-    
-    print(f"HOÀN TẤT! Đã nạp {len(nodes)} chunks của '{title}' vào hệ thống.")
+            # Đẩy cục Vector 5 trang này vào DB ngay lập tức
+            if nodes:
+                index.insert_nodes(nodes)
+                
+        except Exception as e:
+            print(f"Lỗi ở đoạn {start_page + 1}-{end_page}: {str(e)}")
+        finally:
+            # 4. XÓA FILE TẠM VÀ ÉP PYTHON XẢ RÁC TRONG RAM
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+            gc.collect() # <--- Chìa khóa vàng để chống tràn RAM
+
+    print(f"HOÀN TẤT! Đã nạp xong toàn bộ '{title}'.")
     db.close()
 
 # ---------------------------------------------------------
