@@ -5,38 +5,47 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 import models
 from PyPDF2 import PdfReader, PdfWriter
+from dotenv import load_dotenv
 
+# LlamaIndex & Cloud Providers
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
 from llama_index.readers.docling import DoclingReader
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.vector_stores.chroma import ChromaVectorStore
 from docling.datamodel.pipeline_options import PdfPipelineOptions
-import chromadb
+
+# Import OpenAI & Qdrant
+from llama_index.embeddings.openai import OpenAIEmbedding
+import qdrant_client
+from llama_index.vector_stores.qdrant import QdrantVectorStore
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
 # ---------------------------------------------------------
-# 1. CẤU HÌNH AI & VECTOR DB
+# 1. CẤU HÌNH AI & VECTOR DB (OPENAI + QDRANT CLOUD)
 # ---------------------------------------------------------
+print("☁️ Đang kết nối với Qdrant Cloud và OpenAI...")
 
-# Sử dụng model tiếng Việt miễn phí, cực tốt cho embedding văn bản
-print("Đang tải Embedding Model...")
-Settings.embed_model = HuggingFaceEmbedding(model_name="keepitreal/vietnamese-sbert")
+# 1.1 Sử dụng OpenAI Embedding (Rẻ, cực nhanh, không tốn RAM máy)
+Settings.embed_model = OpenAIEmbedding(
+    model="text-embedding-3-small",
+    api_key=os.getenv("OPENAI_API_KEY")
+)
 
-# Khởi tạo ChromaDB lưu trên ổ cứng (thư mục ./chroma_db)
-db_chroma = chromadb.PersistentClient(path="./chroma_db")
-chroma_collection = db_chroma.get_or_create_collection("thomau_collection")
+# 1.2 Kết nối Qdrant Cloud
+qdrant_url = os.getenv("QDRANT_URL")
+qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
-# Kết nối ChromaDB với LlamaIndex
-vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+client = qdrant_client.QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+vector_store = QdrantVectorStore(client=client, collection_name="thomau_collection")
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+# Tạo Index gốc để quản lý việc nhúng Vector
 index = VectorStoreIndex.from_vector_store(vector_store, embed_model=Settings.embed_model)
 
 # ---------------------------------------------------------
-# 2. HÀM XỬ LÝ CHÍNH
+# 2. HÀM XỬ LÝ CHÍNH (CHẠY TRÊN MÁY TÍNH CÁ NHÂN)
 # ---------------------------------------------------------
 def ingest_pdf(file_path: str, title: str):
     db: Session = SessionLocal()
@@ -63,7 +72,7 @@ def ingest_pdf(file_path: str, title: str):
     # 3. ĐỌC FILE PDF GỐC ĐỂ CHIA NHỎ
     pdf_reader = PdfReader(file_path)
     total_pages = len(pdf_reader.pages)
-    chunk_size = 5 # CHỈNH Ở ĐÂY: Xử lý 5 trang 1 lần (Máy yếu có thể giảm xuống 3)
+    chunk_size = 5 # Xử lý 5 trang 1 lần (Máy yếu có thể giảm xuống 3)
 
     print(f"Sách có tổng cộng {total_pages} trang. Bắt đầu tiến trình OCR an toàn...")
 
@@ -124,7 +133,7 @@ def ingest_pdf(file_path: str, title: str):
             # 4. XÓA FILE TẠM VÀ ÉP PYTHON XẢ RÁC TRONG RAM
             if os.path.exists(temp_filename):
                 os.remove(temp_filename)
-            gc.collect() # <--- Chìa khóa vàng để chống tràn RAM
+            gc.collect() # chống tràn RAM
 
     print(f"HOÀN TẤT! Đã nạp xong toàn bộ '{title}'.")
     db.close()

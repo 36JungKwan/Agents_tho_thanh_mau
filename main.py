@@ -1,22 +1,19 @@
-from fastapi import FastAPI, Depends, BackgroundTasks
+from fastapi import FastAPI, Depends, BackgroundTasks, File, UploadFile, Form, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import os
-import chromadb
-
-# LlamaIndex Imports
-from llama_index.core import Settings, VectorStoreIndex, StorageContext
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.core.vector_stores import MetadataFilters, MetadataFilter, FilterOperator, FilterCondition
-
-from fastapi import File, UploadFile, Form, HTTPException
-from typing import Optional
 import shutil
-from llama_index.core import Document as LlamaDocument
-from llama_index.readers.docling import DoclingReader
-from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+# LlamaIndex & Cloud Vector DB Imports
+from llama_index.core import Settings, VectorStoreIndex, StorageContext, Document as LlamaDocument
+from llama_index.embeddings.openai import OpenAIEmbedding
+import qdrant_client
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+from llama_index.core.vector_stores import MetadataFilters, MetadataFilter, FilterOperator, FilterCondition
 from llama_index.core.node_parser import SentenceSplitter
+
+# Lightweight PDF Reader cho Serverless
+from PyPDF2 import PdfReader
 
 from anthropic import Anthropic
 import models
@@ -36,15 +33,20 @@ app = FastAPI(title="Thờ Mẫu RAG API")
 claude_client = Anthropic(api_key=os.getenv("SECRET_API_KEY"))
 
 # Khởi tạo Embedding model (Phải giống hệt model lúc Ingest)
-Settings.embed_model = HuggingFaceEmbedding(model_name="keepitreal/vietnamese-sbert")
+Settings.embed_model = OpenAIEmbedding(
+    model="text-embedding-3-small",
+    api_key=os.getenv("OPENAI_API_KEY")
+)
 
-# Kết nối vào ChromaDB đã lưu trên ổ cứng
-db_chroma = chromadb.PersistentClient(path="./chroma_db")
-chroma_collection = db_chroma.get_or_create_collection("thomau_collection")
-vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+# Kết nối Qdrant Cloud
+qdrant_url = os.getenv("QDRANT_URL")
+qdrant_api_key = os.getenv("QDRANT_API_KEY")
+client = qdrant_client.QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+
+vector_store = QdrantVectorStore(client=client, collection_name="thomau_collection")
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-# Tạo Retriever (Bộ truy xuất) để lấy top 4 đoạn văn liên quan nhất
+# Tạo Index gốc để quản lý việc nhúng Vector
 index = VectorStoreIndex.from_vector_store(vector_store, embed_model=Settings.embed_model)
 
 # ---------------------------------------------------------
@@ -364,15 +366,23 @@ async def submit_artisan_answer(
 # ---------------------------------------------------------
 def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, filename: str):
     try:
-        # Đọc nhanh không cần OCR để tiết kiệm RAM server
-        pipeline_options = PdfPipelineOptions(do_ocr=False) 
-        reader = DoclingReader(pipeline_options=pipeline_options)
+        # 1. Đọc text siêu nhẹ bằng PyPDF2 thay vì Docling
+        pdf_reader = PdfReader(file_path)
+        llama_docs = []
         
-        llama_docs = reader.load_data(file_path=file_path)
+        for page_num, page in enumerate(pdf_reader.pages):
+            text = page.extract_text()
+            if text and text.strip():
+                llama_docs.append(LlamaDocument(
+                    text=text,
+                    metadata={"page_number": page_num + 1}
+                ))
+        
+        # 2. Cắt chunk
         parser = SentenceSplitter(chunk_size=512, chunk_overlap=50)
         nodes = parser.get_nodes_from_documents(llama_docs)
         
-        # 1. Lưu thông tin sách MẬT vào PostgreSQL
+        # 3. Lưu vào Supabase PostgreSQL
         new_doc = models.Document(
             title=filename, 
             source_url="artisan_upload",

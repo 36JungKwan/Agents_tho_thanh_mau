@@ -32,6 +32,7 @@ __pycache__/
 *.jon
 *.pyc
 *.ipynb
-*.txt
+questions.txt
+
 
 

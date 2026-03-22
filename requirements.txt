@@ -1,24 +1,12 @@
-# --- Web Framework & Server ---
 fastapi
 uvicorn
-python-multipart  # Bắt buộc phải có để FastAPI nhận file PDF upload từ App
-
-# --- Database & ORM ---
+python-multipart
 sqlalchemy
 psycopg2-binary
-chromadb
-
-# --- AI & RAG Framework (LlamaIndex ecosystem) ---
 llama-index
-llama-index-readers-docling
-llama-index-vector-stores-chroma
-llama-index-embeddings-huggingface
-docling
-
-# --- LLM Provider ---
-anthropic
-
-# --- Utilities ---
-python-dotenv
-
+llama-index-vector-stores-qdrant
+llama-index-embeddings-openai
+qdrant-client
 PyPDF2
+anthropic
+python-dotenv
