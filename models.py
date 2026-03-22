@@ -47,6 +47,7 @@ class ChatLog(Base):
     __tablename__ = "chat_logs"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True) 
     session_id = Column(String, index=True) # ID phiên chat của user
     artisan_id = Column(Integer, ForeignKey("artisans.id")) # Người dùng đang chat với Bản sao của Nghệ nhân nào?
     user_query = Column(Text, nullable=False) # Câu hỏi: "Hầu đồng là gì?"
@@ -65,6 +66,7 @@ class GlobalUnansweredQuestion(Base):
     __tablename__ = "global_unanswered_questions"
     
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, index=True)
     user_query = Column(Text)
     session_id = Column(String)
     
@@ -101,4 +103,15 @@ class ArtisanAnswer(Base):
     
     # Text mà App (AI C) nhận được (Gõ phím hoặc Ghi âm chuyển thành Text)
     answer_text = Column(Text) 
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+# ==========================================
+# 7. NGÂN HÀNG CÂU HỎI SOẠN SẴN (KỊCH BẢN)
+# ==========================================
+class PreDraftedQuestion(Base):
+    __tablename__ = "pre_drafted_questions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    raw_topic = Column(Text, nullable=False) # Chủ đề thô (VD: "Quy tắc hầu giá Chầu Đệ Nhị")
+    is_used = Column(Boolean, default=False) # Đánh dấu đã bốc ra hỏi chưa
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

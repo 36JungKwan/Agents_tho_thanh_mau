@@ -51,8 +51,9 @@ index = VectorStoreIndex.from_vector_store(vector_store, embed_model=Settings.em
 # CẤU TRÚC REQUEST
 # ---------------------------------------------------------
 class ChatRequest(BaseModel):
-    session_id: str
-    artisan_id: int # Yêu cầu người dùng chọn Nghệ nhân
+    user_id: str     # Nhận diện chính xác Người dùng (Tài khoản/SĐT/Email)
+    session_id: str  # ID của phiên chat hiện tại
+    artisan_id: int  # Đang chat với Nghệ nhân nào
     user_query: str
 
 # Dependency lấy DB session
@@ -66,9 +67,10 @@ def get_db():
 # ---------------------------------------------------------
 # 3. TASK CHẠY NGẦM: LƯU LOG & BẮT CÂU HỎI KHÓ
 # ---------------------------------------------------------
-def save_background_logs(db: Session, session_id: str, artisan_id: int, original_query: str, search_query: str, ai_answer: str, context_metadata: list):
+def save_background_logs(db: Session, user_id: str, session_id: str, artisan_id: int, original_query: str, search_query: str, ai_answer: str, context_metadata: list):
     # 1. Lưu vào ChatLogs (Vẫn lưu câu gốc để giữ nguyên lịch sử chat tự nhiên)
     new_log = models.ChatLog(
+        user_id=user_id,
         session_id=session_id,
         artisan_id=artisan_id,
         user_query=original_query, 
@@ -79,14 +81,15 @@ def save_background_logs(db: Session, session_id: str, artisan_id: int, original
 
     # 2. KIỂM TRA TỪ KHÓA BẮT LỖI
     # Nếu AI A thú nhận là không biết, lập tức quăng câu hỏi vào Bể chung
-    if "tôi chưa có tài liệu ghi chép" in ai_answer.lower():
+    if "chưa có tài liệu ghi chép" in ai_answer.lower():
         # LƯU Ý: Dùng 'search_query' (câu đã viết lại đủ ngữ cảnh) ném vào Bể chung cho AI B
         unanswered = models.GlobalUnansweredQuestion(
+            user_id=user_id,
             user_query=search_query,
             session_id=session_id
         )
         db.add(unanswered)
-        print(f"[LOG] Đã lưu câu hỏi khó vào Bể chung: '{search_query}'")
+        print(f"[LOG] Đã lưu câu hỏi khó từ user {user_id} vào Bể chung: '{search_query}'")
         
     db.commit()
 
@@ -97,14 +100,17 @@ def save_background_logs(db: Session, session_id: str, artisan_id: int, original
 async def chat_with_artisan_twin(request: ChatRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     original_query = request.user_query
     session_id = request.session_id
+    user_id = request.user_id
+    artisan_id = request.artisan_id
     
     # ==========================================
     # BƯỚC 1: LẤY LỊCH SỬ TRÒ CHUYỆN (TRÍ NHỚ)
     # ==========================================
     # Chỉ lấy lịch sử của user này với ĐÚNG vị Nghệ nhân này
     history_logs = db.query(models.ChatLog).filter(
-        models.ChatLog.session_id == request.session_id,
-        models.ChatLog.artisan_id == request.artisan_id
+        models.ChatLog.session_id == user_id,
+        models.ChatLog.session_id == session_id,
+        models.ChatLog.artisan_id == artisan_id
     ).order_by(models.ChatLog.created_at.desc()).limit(4).all()
     
     history_logs = history_logs[::-1] # Đảo ngược từ cũ đến mới
@@ -183,13 +189,39 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
     # ==========================================
     # BƯỚC 5: GỌI CLAUDE TRẢ LỜI CÓ GÀI BẪY
     # ==========================================
+    artisan = db.query(models.Artisan).filter(models.Artisan.id == request.artisan_id).first()
+    
+    # Đề phòng trường hợp Frontend truyền sai ID
+    if not artisan:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Nghệ nhân này trong hệ thống!")
+        
+    artisan_name = artisan.name
+    artisan_bio = artisan.bio if artisan.bio else "Một bậc thầy am hiểu sâu sắc về Tín ngưỡng Thờ Mẫu."
+
+    # Kéo 3 câu trả lời thực tế gần nhất để Claude học "khẩu khí"
+    recent_answers = db.query(models.ArtisanAnswer).filter(
+        models.ArtisanAnswer.artisan_id == artisan_id
+    ).order_by(models.ArtisanAnswer.created_at.desc()).limit(3).all()
+
+    style_injection = ""
+    if recent_answers:
+        style_examples = "\n".join([f"- \"{ans.answer_text}\"" for ans in recent_answers])
+        style_injection = (
+            "\n\nĐể đảm bảo tính chân thực, dưới đây là MỘT SỐ CÂU NÓI THỰC TẾ CỦA BẠN TRONG QUÁ KHỨ. "
+            "Hãy phân tích và BẮT CHƯỚC TUYỆT ĐỐI phong cách, từ ngữ thói quen, cách xưng hô và khẩu khí trong các ví dụ này "
+            f"khi trả lời người dùng:\n{style_examples}"
+        )
+
     system_prompt = (
-        "Bạn là Bản sao AI của một Nghệ nhân Tín ngưỡng Thờ Mẫu. "
-        "Giọng điệu trang trọng, từ tốn, uy nghiêm nhưng gần gũi. Xưng 'tôi' và gọi 'bạn'. "
-        "Hãy dùng thông tin tham khảo dưới đây để tiếp tục cuộc trò chuyện.\n\n"
+        f"Bạn là {artisan_name}. {artisan_bio}\n\n"
+        "Bạn đang đóng vai là Bản sao số (Digital Twin) của chính mình để truyền dạy và giải đáp thắc mắc về Đạo Mẫu. "
+        "Giọng điệu trang trọng, từ tốn, uy nghiêm nhưng gần gũi mang đậm phong thái của một bậc Thầy. "
+        "Hãy xưng hô và sử dụng từ ngữ sao cho tự nhiên nhất, giống hệt với cách bạn vẫn thường giao tiếp."
+        f"{style_injection}\n\n"
+        "Hãy dùng thông tin tham khảo dưới đây để tiếp tục cuộc trò chuyện. Hãy trả lời thật tự nhiên như đang nói chuyện trực tiếp.\n\n"
         "ĐIỀU KIỆN TỐI QUAN TRỌNG: Nếu thông tin tham khảo KHÔNG chứa câu trả lời và bạn không biết chắc chắn, "
         "bạn TUYỆT ĐỐI KHÔNG ĐƯỢC BỊA ĐẶT. Bạn phải nói câu có chứa cụm từ sau: "
-        "'tôi chưa có tài liệu ghi chép' để hẹn người dùng trả lời sau.\n\n"
+        "'chưa có tài liệu ghi chép' để hẹn người dùng trả lời sau.\n\n"
         f"--- THÔNG TIN THAM KHẢO ---\n{joined_context}\n--------------------------"
     )
     
@@ -216,6 +248,7 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
     )
     
     return {
+        "user_id": user_id,
         "artisan_id_used": request.artisan_id,
         "user_query": original_query,
         "search_query_used": search_query,

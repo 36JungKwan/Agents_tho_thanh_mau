@@ -55,6 +55,42 @@ def run_ai_b_coordinator():
             print("[AI Worker] Đã chia xong câu hỏi từ Người dùng!")
             return # Dừng hàm vì đã hoàn thành KPI
 
+        # =========================================================
+        # TẦNG 2: BỐC KỊCH BẢN ĐÃ SOẠN SẴN (Ưu tiên Trung bình)
+        # =========================================================
+        print("[AI Worker] Không nợ câu hỏi nào. Đang kiểm tra Ngân hàng Kịch bản...")
+        
+        drafted_question = db.query(models.PreDraftedQuestion).filter(
+            models.PreDraftedQuestion.is_used == False
+        ).first()
+
+        if drafted_question:
+            print(f"[AI Worker] TẦNG 2: Bốc được chủ đề thô: '{drafted_question.raw_topic}'")
+            
+            prompt = (
+                "Bạn là đệ tử ngoan đang học Đạo Mẫu. Bạn muốn hỏi Sư phụ về chủ đề sau:\n"
+                f"'{drafted_question.raw_topic}'\n"
+                "Hãy đặt MỘT câu hỏi cực kỳ lễ phép, ngoan ngoãn để gợi mở Sư phụ chia sẻ kinh nghiệm. "
+                "Xưng 'con', gọi 'Thầy/Cô'. Không giải thích, chỉ in ra câu hỏi."
+            )
+            response = claude_client.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=200,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            polite_drafted_prompt = response.content[0].text.strip()
+            print(f"Đã chuyển ngữ thành: '{polite_drafted_prompt}'")
+            
+            for artisan in artisans:
+                db.add(models.InterviewQueue(
+                    artisan_id=artisan.id, question_id=None,
+                    ai_b_prompt=polite_drafted_prompt, status="pending"
+                ))
+            
+            drafted_question.is_used = True # Đốt cháy kịch bản này
+            db.commit()
+            print("[AI Worker] Đã rải kịch bản soạn sẵn cho Sư phụ!")
+            return # DỪNG LẠI, không chạy xuống tầng 3
+        
         # ---------------------------------------------------------
         # LUỒNG 2: KHÔNG CÓ CÂU HỎI -> BỐC SÁCH RA HỎI (PROACTIVE)
         # ---------------------------------------------------------
