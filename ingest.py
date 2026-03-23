@@ -22,6 +22,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
+load_dotenv()
+
 # ---------------------------------------------------------
 # 1. CẤU HÌNH AI & VECTOR DB (OPENAI + QDRANT CLOUD)
 # ---------------------------------------------------------

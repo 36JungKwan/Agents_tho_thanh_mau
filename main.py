@@ -192,7 +192,7 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
     joined_context = "\n\n".join(context_texts)
     
     # ==========================================
-    # BƯỚC 5: GỌI CLAUDE TRẢ LỜI CÓ GÀI BẪY
+    # BƯỚC 5: GỌI Gemini TRẢ LỜI CÓ GÀI BẪY
     # ==========================================
     artisan = db.query(models.Artisan).filter(models.Artisan.id == request.artisan_id).first()
     

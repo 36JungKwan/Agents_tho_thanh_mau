@@ -57,7 +57,7 @@ class ChatLog(Base):
     # Lưu dưới dạng JSON list các DocumentChunk IDs hoặc text trực tiếp
     retrieved_context = Column(JSON, nullable=True) 
     
-    ai_initial_response = Column(Text, nullable=False) # Câu trả lời gốc của Claude
+    ai_initial_response = Column(Text, nullable=False) # Câu trả lời gốc của Gemini
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 # ==========================================
