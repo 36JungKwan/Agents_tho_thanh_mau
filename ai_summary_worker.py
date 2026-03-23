@@ -1,14 +1,17 @@
 import os
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.expression import func
-from anthropic import Anthropic
 from dotenv import load_dotenv
 
+import google.genai as genai
 import models
 from database import SessionLocal
 
 load_dotenv()
-claude_client = Anthropic(api_key=os.getenv("SECRET_API_KEY"))
+# Cấu hình Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Khởi tạo model Flash (Tối ưu cho tốc độ và chi phí)
+worker_model = genai.GenerativeModel('gemini-2.0-flash')
 
 def run_ai_b_coordinator():
     db: Session = SessionLocal()
@@ -25,7 +28,7 @@ def run_ai_b_coordinator():
         # ---------------------------------------------------------
         unprocessed_questions = db.query(models.GlobalUnansweredQuestion).filter(
             models.GlobalUnansweredQuestion.is_processed_by_ai_b == False
-        ).all()
+        ).limit(10).all()
         
         if unprocessed_questions:
             print(f"[AI Worker] Tìm thấy {len(unprocessed_questions)} câu hỏi thực tế. Đang chia bài...")
@@ -37,11 +40,9 @@ def run_ai_b_coordinator():
                     "Hãy chuyển tiếp câu này thành một câu hỏi cực kỳ lễ phép để hỏi Sư phụ (Nghệ nhân). "
                     "Xưng 'con', gọi 'Thầy/Cô'. Chỉ in ra câu hỏi."
                 )
-                response = claude_client.messages.create(
-                    model="claude-haiku-4-5-20251001", max_tokens=200,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                polite_prompt = response.content[0].text.strip()
+                # Gọi Gemini
+                response = worker_model.generate_content(prompt)
+                polite_prompt = response.text.strip()
                 
                 # Chia cho các Sư phụ
                 for artisan in artisans:
@@ -73,11 +74,10 @@ def run_ai_b_coordinator():
                 "Hãy đặt MỘT câu hỏi cực kỳ lễ phép, ngoan ngoãn để gợi mở Sư phụ chia sẻ kinh nghiệm. "
                 "Xưng 'con', gọi 'Thầy/Cô'. Không giải thích, chỉ in ra câu hỏi."
             )
-            response = claude_client.messages.create(
-                model="claude-haiku-4-5-20251001", max_tokens=200,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            polite_drafted_prompt = response.content[0].text.strip()
+
+            # Gọi Gemini
+            response = worker_model.generate_content(prompt)
+            polite_drafted_prompt = response.text.strip()
             print(f"Đã chuyển ngữ thành: '{polite_drafted_prompt}'")
             
             for artisan in artisans:
@@ -94,7 +94,7 @@ def run_ai_b_coordinator():
         # ---------------------------------------------------------
         # LUỒNG 2: KHÔNG CÓ CÂU HỎI -> BỐC SÁCH RA HỎI (PROACTIVE)
         # ---------------------------------------------------------
-        print("[AI Worker] Không có câu hỏi khó nào từ User. Đang trích xuất Sách để hỏi thăm Sư phụ...")
+        print("[AI Worker] Không có câu hỏi khó nào từ User và Kịch bản đã cạn kiệt. Đang trích xuất Sách để hỏi thăm Sư phụ...")
         
         # Bốc ngẫu nhiên (ORDER BY RANDOM) 1 đoạn chunk từ Sách phổ thông (owner_id = None)
         random_chunk = db.query(models.DocumentChunk).join(models.Document).filter(
@@ -104,7 +104,7 @@ def run_ai_b_coordinator():
         if random_chunk:
             print(f"Đã bốc được đoạn văn ở trang {random_chunk.page_number}: '{random_chunk.chunk_text[:50]}...'")
             
-            # Yêu cầu Claude đọc đoạn sách và sinh ra câu hỏi gợi mở
+            # Yêu cầu Gemini đọc đoạn sách và sinh ra câu hỏi gợi mở
             book_prompt = (
                 "Bạn là đệ tử ngoan ngoãn đang học Đạo Mẫu. Bạn vừa đọc được đoạn sách sau:\n"
                 f"--- SÁCH ---\n{random_chunk.chunk_text}\n---\n"
@@ -113,11 +113,9 @@ def run_ai_b_coordinator():
                 "Xưng 'con', gọi 'Thầy/Cô'. Chỉ in ra câu hỏi."
             )
             
-            response = claude_client.messages.create(
-                model="claude-haiku-4-5-20251001", max_tokens=200,
-                messages=[{"role": "user", "content": book_prompt}]
-            )
-            polite_book_prompt = response.content[0].text.strip()
+            # Gọi Gemini
+            response = worker_model.generate_content(book_prompt)
+            polite_book_prompt = response.text.strip()
             print(f"Câu hỏi khơi gợi: '{polite_book_prompt}'")
             
             # Đẩy vào hộp thư Sư phụ (Lưu ý: question_id = None vì câu này không đến từ User)

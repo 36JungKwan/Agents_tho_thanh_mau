@@ -14,6 +14,7 @@ class Artisan(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     bio = Column(Text) # Giới thiệu ngắn, dùng để mớm tính cách cho AI A và AI C
+    style_profile = Column(Text, nullable=True) # CHứa khí chất của nghệ nhân và sẽ được cập nhật thường xuyên
 
 # ==========================================
 # 2. BẢNG TÀI LIỆU & ĐOẠN VĂN (Kiến thức)

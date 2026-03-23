@@ -13,10 +13,10 @@ from llama_index.readers.docling import DoclingReader
 from llama_index.core.node_parser import SentenceSplitter
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 
-# Import OpenAI & Qdrant
-from llama_index.embeddings.openai import OpenAIEmbedding
+# Import Gemini & Qdrant
 import qdrant_client
 from llama_index.vector_stores.qdrant import QdrantVectorStore
+from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -25,12 +25,16 @@ os.environ["MKL_NUM_THREADS"] = "1"
 # ---------------------------------------------------------
 # 1. CẤU HÌNH AI & VECTOR DB (OPENAI + QDRANT CLOUD)
 # ---------------------------------------------------------
-print("☁️ Đang kết nối với Qdrant Cloud và OpenAI...")
+print("Đang kết nối với Qdrant Cloud và Gemini...")
 
-# 1.1 Sử dụng OpenAI Embedding (Rẻ, cực nhanh, không tốn RAM máy)
-Settings.embed_model = OpenAIEmbedding(
-    model="text-embedding-3-small",
-    api_key=os.getenv("OPENAI_API_KEY")
+# 1.1 Cấu hình API Key cho toàn bộ SDK của Google
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Khởi tạo Embedding model của Gemini
+Settings.embed_model = GoogleGenAIEmbedding(
+    model_name="models/gemini-embedding-001", 
+    api_key=GEMINI_API_KEY,
+    text_task_type="RETRIEVAL_DOCUMENT"
 )
 
 # 1.2 Kết nối Qdrant Cloud
@@ -168,6 +172,9 @@ def process_all_pdfs_in_folder(folder_path: str):
 # 4. CHẠY SCRIPT
 # ---------------------------------------------------------
 if __name__ == "__main__":
+    from database import engine
+    models.Base.metadata.create_all(bind=engine)
+
     # Tên thư mục chứa sách
     data_folder = "./data_sach"
     

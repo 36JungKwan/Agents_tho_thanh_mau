@@ -3,22 +3,23 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import os
 import shutil
+from fastapi.responses import StreamingResponse
 
 # LlamaIndex & Cloud Vector DB Imports
 from llama_index.core import Settings, VectorStoreIndex, StorageContext, Document as LlamaDocument
-from llama_index.embeddings.openai import OpenAIEmbedding
 import qdrant_client
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.core.vector_stores import MetadataFilters, MetadataFilter, FilterOperator, FilterCondition
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
+import google.genai as genai
 
 # Lightweight PDF Reader cho Serverless
 from PyPDF2 import PdfReader
+from dotenv import load_dotenv
 
-from anthropic import Anthropic
 import models
 from database import SessionLocal, engine
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -28,14 +29,18 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Thờ Mẫu RAG API")
 
 # ---------------------------------------------------------
-# CẤU HÌNH AI (Claude & LlamaIndex)
+# CẤU HÌNH AI (Gemini & LlamaIndex)
 # ---------------------------------------------------------
-claude_client = Anthropic(api_key=os.getenv("SECRET_API_KEY"))
+# Cấu hình API Key cho toàn bộ SDK của Google
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=GEMINI_API_KEY)
 
-# Khởi tạo Embedding model (Phải giống hệt model lúc Ingest)
-Settings.embed_model = OpenAIEmbedding(
-    model="text-embedding-3-small",
-    api_key=os.getenv("OPENAI_API_KEY")
+# Khởi tạo Embedding model của Gemini
+Settings.embed_model = GoogleGenAIEmbedding(
+    model_name="models/gemini-embedding-001", 
+    api_key=GEMINI_API_KEY,
+    query_task_type="RETRIEVAL_QUERY", 
+    text_task_type="RETRIEVAL_DOCUMENT"
 )
 
 # Kết nối Qdrant Cloud
@@ -118,12 +123,12 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
     history_logs = history_logs[::-1] # Đảo ngược từ cũ đến mới
     
     history_text = ""
-    messages_for_claude = []
+    messages_for_gemini = []
     
     for log in history_logs:
         history_text += f"User: {log.user_query}\nAI: {log.ai_initial_response}\n"
-        messages_for_claude.append({"role": "user", "content": log.user_query})
-        messages_for_claude.append({"role": "assistant", "content": log.ai_initial_response})
+        messages_for_gemini.append({"role": "user", "parts": [log.user_query]})
+        messages_for_gemini.append({"role": "model", "parts": [log.ai_initial_response]})
 
     # ---------------------------------------------------------
     # BƯỚC 2: VIẾT LẠI CÂU HỎI (NẾU CÓ LỊCH SỬ) ĐỂ TÌM KIẾM VECTOR
@@ -137,13 +142,11 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
             "KHÔNG trả lời câu hỏi. CHỈ in ra câu hỏi đã được viết lại."
         )
         
-        # Gọi Claude 1 nhịp nhanh để rewrite (Tốn vài mili-giây)
-        rewrite_response = claude_client.messages.create(
-            model="claude-haiku-4-5-20251001", # Hoặc tên model bạn đang dùng chạy thành công
-            max_tokens=50,
-            messages=[{"role": "user", "content": rewrite_prompt}]
-        )
-        search_query = rewrite_response.content[0].text.strip()
+        # Gọi Gemini 1 nhịp nhanh để rewrite (Tốn vài mili-giây)
+        rewrite_model = genai.GenerativeModel('gemini-2.0-flash')
+        rewrite_response = rewrite_model.generate_content(rewrite_prompt)
+        search_query = rewrite_response.text.strip()
+
         print(f"🔍 [LOG] Câu hỏi gốc: '{original_query}' -> Viết lại thành: '{search_query}'")
 
    # ==========================================
@@ -159,7 +162,7 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
         condition=FilterCondition.OR
     )
 
-    retriever = index.as_retriever(similarity_top_k=4, filters=filters)
+    retriever = index.as_retriever(similarity_top_k=5, filters=filters)
     
     # ==========================================
     # BƯỚC 4: TÌM KIẾM NGỮ CẢNH BẰNG CÂU HỎI ĐÃ VIẾT LẠI
@@ -199,27 +202,13 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
         
     artisan_name = artisan.name
     artisan_bio = artisan.bio if artisan.bio else "Một bậc thầy am hiểu sâu sắc về Tín ngưỡng Thờ Mẫu."
+    core_persona = artisan.style_profile if artisan.style_profile else "Nói chuyện từ tốn, uy nghiêm nhưng gần gũi."
 
-    # Kéo 3 câu trả lời thực tế gần nhất để Claude học "khẩu khí"
-    recent_answers = db.query(models.ArtisanAnswer).filter(
-        models.ArtisanAnswer.artisan_id == artisan_id
-    ).order_by(models.ArtisanAnswer.created_at.desc()).limit(3).all()
-
-    style_injection = ""
-    if recent_answers:
-        style_examples = "\n".join([f"- \"{ans.answer_text}\"" for ans in recent_answers])
-        style_injection = (
-            "\n\nĐể đảm bảo tính chân thực, dưới đây là MỘT SỐ CÂU NÓI THỰC TẾ CỦA BẠN TRONG QUÁ KHỨ. "
-            "Hãy phân tích và BẮT CHƯỚC TUYỆT ĐỐI phong cách, từ ngữ thói quen, cách xưng hô và khẩu khí trong các ví dụ này "
-            f"khi trả lời người dùng:\n{style_examples}"
-        )
-
-    system_prompt = (
+    system_instruction = (
         f"Bạn là {artisan_name}. {artisan_bio}\n\n"
         "Bạn đang đóng vai là Bản sao số (Digital Twin) của chính mình để truyền dạy và giải đáp thắc mắc về Đạo Mẫu. "
-        "Giọng điệu trang trọng, từ tốn, uy nghiêm nhưng gần gũi mang đậm phong thái của một bậc Thầy. "
-        "Hãy xưng hô và sử dụng từ ngữ sao cho tự nhiên nhất, giống hệt với cách bạn vẫn thường giao tiếp."
-        f"{style_injection}\n\n"
+        "ĐÂY LÀ HƯỚNG DẪN BẮT BUỘC VỀ PHONG CÁCH GIAO TIẾP CỦA BẠN (Phải tuân thủ tuyệt đối):\n"
+        f"> {core_persona}\n\n"
         "Hãy dùng thông tin tham khảo dưới đây để tiếp tục cuộc trò chuyện. Hãy trả lời thật tự nhiên như đang nói chuyện trực tiếp.\n\n"
         "ĐIỀU KIỆN TỐI QUAN TRỌNG: Nếu thông tin tham khảo KHÔNG chứa câu trả lời và bạn không biết chắc chắn, "
         "bạn TUYỆT ĐỐI KHÔNG ĐƯỢC BỊA ĐẶT. Bạn phải nói câu có chứa cụm từ sau: "
@@ -227,36 +216,40 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
         f"--- THÔNG TIN THAM KHẢO ---\n{joined_context}\n--------------------------"
     )
     
-    # Thêm câu hỏi mới nhất vào mảng tin nhắn gửi cho Claude
-    messages_for_claude.append({"role": "user", "content": original_query})
-    
-    response = claude_client.messages.create(
-        model="claude-haiku-4-5-20251001", # Hoặc tên model bạn đang dùng
-        max_tokens=1000,
-        system=system_prompt,
-        messages=messages_for_claude
+    # Khởi tạo model Gemini với System Prompt
+    gemini_model = genai.GenerativeModel(
+        model_name="gemini-2.5-pro",
+        system_instruction=system_instruction
     )
     
-    ai_answer = response.content[0].text
+    # Đẩy câu hỏi mới nhất vào mảng
+    messages_for_gemini.append({"role": "user", "parts": [original_query]})
     
-    # ==========================================
-    # BƯỚC 6: LƯU LOG & BẮT CÂU HỎI KHÓ (CHẠY NGẦM)
-    # ==========================================
-    background_tasks.add_task(
-        save_background_logs, db,
-        request.session_id, request.artisan_id,
-        original_query, search_query, ai_answer,
-        saved_context_metadata
+    # Bật tính năng truyền phát trực tiếp (Stream)
+    response_stream = gemini_model.generate_content(
+        messages_for_gemini,
+        generation_config=genai.types.GenerationConfig(
+            max_output_tokens=1000,
+            temperature=0.3 # Tối ưu hóa tính cách Nghệ nhân
+        ),
+        stream=True
     )
     
-    return {
-        "user_id": user_id,
-        "artisan_id_used": request.artisan_id,
-        "user_query": original_query,
-        "search_query_used": search_query,
-        "ai_response": ai_answer,
-        "sources": saved_context_metadata
-    }
+    # Hàm Generator xử lý Stream và Lưu Background
+    async def stream_generator():
+        full_ai_answer = ""
+        for chunk in response_stream:
+            if chunk.text:
+                full_ai_answer += chunk.text
+                yield chunk.text
+                
+        # Sau khi truyền hết chữ cho Frontend, tiến hành lưu DB
+        save_background_logs(
+            db, user_id, session_id, artisan_id,
+            original_query, search_query, full_ai_answer, saved_context_metadata
+        )
+    
+    return StreamingResponse(stream_generator(), media_type="text/plain")
 
 # =========================================================
 # 5. API CHO AI C (ĐỆ TỬ ẢO TRÊN MOBILE APP CỦA NGHỆ NHÂN)
@@ -291,8 +284,8 @@ async def submit_artisan_answer(
     artisan_id: int,
     background_tasks: BackgroundTasks,
     interview_id: int = Form(...),
-    answer_text: Optional[str] = Form(None),
-    upload_file: Optional[UploadFile] = File(None),
+    answer_text: str | None = Form(None),
+    upload_file: UploadFile | None = File(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -308,36 +301,7 @@ async def submit_artisan_answer(
         raise HTTPException(status_code=404, detail="Không tìm thấy câu hỏi này trong hộp thư của Sư phụ!")
 
     # ---------------------------------------------------------
-    # TRƯỜNG HỢP 1: NGHỆ NHÂN GÕ CHỮ (Hoặc nói vào mic chuyển thành Text)
-    # ---------------------------------------------------------
-    if answer_text:
-        # Lưu vào PostgreSQL để làm Di sản
-        new_answer = models.ArtisanAnswer(
-            interview_id=interview_id,
-            artisan_id=artisan_id,
-            answer_text=answer_text
-        )
-        db.add(new_answer)
-        db.commit()
-
-        # Gộp cả Câu hỏi + Câu trả lời vào chung 1 khối Text để AI A dễ tìm kiếm sau này
-        full_context_text = f"Vấn đề: {task.ai_b_prompt}\nSư phụ giảng giải: {answer_text}"
-
-        # Biến đoạn text thành Vector và nhét thẳng vào ChromaDB
-        # Gắn nhãn owner chính xác là Sư phụ này
-        doc = LlamaDocument(
-            text=full_context_text,
-            metadata={
-                "document_title": f"Hồ sơ vấn đáp của Sư phụ {artisan_id}", # Title ngắn gọn, an toàn
-                "owner": f"artisan_{artisan_id}" # Đóng dấu bản quyền
-            }
-        )
-        # Hàm insert tự động cắt chunk và gọi Embedding model
-        index.insert(doc) 
-        print(f"Đã nạp trọn vẹn bối cảnh (Hỏi & Đáp) của Sư phụ {artisan_id} vào Não bộ AI A.")
-
-    # ---------------------------------------------------------
-    # TRƯỜNG HỢP 2: NGHỆ NHÂN TẢI FILE PDF (Tài liệu nghiên cứu riêng)
+    # TRƯỜNG HỢP 1: SƯ PHỤ TẢI FILE PDF (Chốt luôn, không hỏi vặn vẹo)
     # ---------------------------------------------------------
     if upload_file:
         # Lưu file tạm thời lên Server
@@ -351,14 +315,60 @@ async def submit_artisan_answer(
         background_tasks.add_task(
             process_artisan_private_pdf, db, artisan_id, temp_file_path, upload_file.filename
         )
-
-    # ---------------------------------------------------------
-    # CẬP NHẬT TRẠNG THÁI: ĐÃ TRẢ LỜI XONG
-    # ---------------------------------------------------------
-    task.status = "answered"
-    db.commit()
+        task.status = "answered"
+        db.commit()
+        return {"action": "completed", 
+                "message": "Dạ con cám ơn Sư phụ đã chia sẻ tài liệu quý báu ạ. Lời dạy của Sư phụ đã được con ghi nhớ."
+        }
     
-    return {"message": "Dạ con cám ơn Sư phụ! Lời dạy của Sư phụ đã được con ghi nhớ và truyền lại cho người hỏi ạ."}
+    # ---------------------------------------------------------
+    # TRƯỜNG HỢP 2: SƯ PHỤ GÕ CHỮ (AI C đánh giá và trò chuyện)
+    # ---------------------------------------------------------
+    if answer_text:
+        # Gọi Gemini (AI C) vào đánh giá chất lượng câu trả lời
+        eval_model = genai.GenerativeModel('gemini-2.5-flash')
+        eval_prompt = (
+            f"Bạn là một người phỏng vấn. Bạn đã hỏi Sư phụ câu này: '{task.ai_b_prompt}'\n"
+            f"Sư phụ trả lời: '{answer_text}'\n\n"
+            "Nhiệm vụ: Hãy đánh giá xem câu trả lời này đã đủ chi tiết chưa. "
+            "Nếu quá ngắn gọn, lấp lửng hoặc chưa rõ ràng, hãy đóng vai Đệ tử ngoan ngoãn, đặt tiếp 1 câu hỏi lễ phép để khai thác sâu hơn. "
+            "Nếu câu trả lời đã đủ chi tiết và trọn vẹn, CHỈ CẦN IN RA DUY NHẤT CHỮ 'OK'."
+        )
+        eval_response = eval_model.generate_content(eval_prompt)
+        eval_result = eval_response.text.strip()
+        
+        # LƯU DI SẢN (Dù ngắn hay dài cũng lưu lại để máy học văn phong)
+        new_answer = models.ArtisanAnswer(
+            interview_id=interview_id, artisan_id=artisan_id, answer_text=answer_text
+        )
+        db.add(new_answer)
+        
+        # Nếu AI C thấy chưa thỏa mãn -> Hỏi tiếp
+        if eval_result != "OK":
+            # Cập nhật lại câu hỏi AI B Prompt thành câu hỏi mới để App hiển thị tiếp
+            task.ai_b_prompt = f"{task.ai_b_prompt}\nSư phụ: {answer_text}\nĐệ tử: {eval_result}"
+            db.commit()
+            
+            return {
+                "action": "continue_chat", 
+                "message": eval_result # Bắn câu hỏi xoáy về cho App Mobile hiển thị
+            }
+
+        # Nếu AI C thấy 'OK' (Đã thỏa mãn) -> Nạp Vector và kết thúc
+        full_context_text = f"Vấn đề: {task.ai_b_prompt}\nSư phụ giải đáp: {answer_text}"
+        doc = LlamaDocument(
+            text=full_context_text,
+            metadata={"document_title": f"Hồ sơ vấn đáp của Sư phụ {artisan_id}", "owner": f"artisan_{artisan_id}"}
+        )
+        index.insert(doc) 
+        
+        task.status = "answered"
+        db.commit()
+        
+        return {
+            "action": "completed", 
+            "message": "Dạ con đã ghi chép lại đầy đủ. Cám ơn Sư phụ đã chỉ dạy ạ."
+        }
 
 
 # ---------------------------------------------------------
@@ -407,7 +417,7 @@ def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, fi
             db.commit()
             db.refresh(new_chunk)
             
-            # GẮN NHÃN BẢN QUYỀN VÀO TỪNG NODE TRONG CHROMADB
+            # GẮN NHÃN BẢN QUYỀN VÀO TỪNG NODE TRONG QDRANT
             node.metadata["pg_chunk_id"] = new_chunk.id
             node.metadata["document_title"] = filename
             node.metadata["page_number"] = page_num
