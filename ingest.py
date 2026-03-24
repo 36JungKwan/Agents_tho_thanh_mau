@@ -2,21 +2,23 @@ import os
 import glob
 import gc
 from sqlalchemy.orm import Session
-from database import SessionLocal
+from database import SessionLocal, engine 
 import models
-from PyPDF2 import PdfReader, PdfWriter
+from PIL import Image
+import fitz
+import io
+import uuid
 from dotenv import load_dotenv
 
 # LlamaIndex & Cloud Providers
-from llama_index.core import VectorStoreIndex, StorageContext, Settings
-from llama_index.readers.docling import DoclingReader
+from llama_index.core import VectorStoreIndex, StorageContext, Settings, Document as LlamaDocument
 from llama_index.core.node_parser import SentenceSplitter
-from docling.datamodel.pipeline_options import PdfPipelineOptions
 
 # Import Gemini & Qdrant
 import qdrant_client
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
+import google.genai as genai
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -31,6 +33,7 @@ print("Đang kết nối với Qdrant Cloud và Gemini...")
 
 # 1.1 Cấu hình API Key cho toàn bộ SDK của Google
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Khởi tạo Embedding model của Gemini
 Settings.embed_model = GoogleGenAIEmbedding(
@@ -49,6 +52,9 @@ storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
 # Tạo Index gốc để quản lý việc nhúng Vector
 index = VectorStoreIndex.from_vector_store(vector_store, embed_model=Settings.embed_model)
+
+# Khởi tạo bộ cắt chữ chuẩn
+parser = SentenceSplitter(chunk_size=512, chunk_overlap=50)
 
 # ---------------------------------------------------------
 # 2. HÀM XỬ LÝ CHÍNH (CHẠY TRÊN MÁY TÍNH CÁ NHÂN)
@@ -70,46 +76,63 @@ def ingest_pdf(file_path: str, title: str):
     db.commit()
     db.refresh(new_doc)
 
-    # 2. Cấu hình OCR chạy 1 luồng
-    pipeline_options = PdfPipelineOptions(do_ocr=True, num_threads=1) 
-    reader = DoclingReader(pipeline_options=pipeline_options)
-    parser = SentenceSplitter(chunk_size=512, chunk_overlap=50)
-
-    # 3. ĐỌC FILE PDF GỐC ĐỂ CHIA NHỎ
-    pdf_reader = PdfReader(file_path)
-    total_pages = len(pdf_reader.pages)
-    chunk_size = 5 # Xử lý 5 trang 1 lần (Máy yếu có thể giảm xuống 3)
+    # Mở PDF bằng PyMuPDF
+    pdf_document = fitz.open(file_path)
+    total_pages = len(pdf_document)
 
     print(f"Sách có tổng cộng {total_pages} trang. Bắt đầu tiến trình OCR an toàn...")
 
     chunk_index_counter = 0
 
-    # Vòng lặp cắt file PDF
-    for start_page in range(0, total_pages, chunk_size):
-        end_page = min(start_page + chunk_size, total_pages)
-        temp_filename = f"./temp_ocr_{start_page}_{end_page}.pdf"
+    for page_idx in range(total_pages):
+        real_page_number = page_idx + 1
+        page = pdf_document[page_idx]
         
-        # Cắt và lưu 5 trang ra một file tạm
-        pdf_writer = PdfWriter()
-        for i in range(start_page, end_page):
-            pdf_writer.add_page(pdf_reader.pages[i])
+        # 1. THỬ LẤY TEXT TRỰC TIẾP TRƯỚC (Rất nhanh)
+        text = page.get_text("text").strip()
         
-        with open(temp_filename, "wb") as f:
-            pdf_writer.write(f)
-            
-        print(f"  -> Đang quét OCR từ trang {start_page + 1} đến {end_page}...")
+        # 2. ĐÁNH GIÁ CHẤT LƯỢNG TEXT (Bắt lỗi "Bi ế n đổ i")
+        is_garbage_text = False
+        if len(text) > 0:
+            space_ratio = text.count(' ') / len(text)
+            if space_ratio > 0.25:
+                is_garbage_text = True
+                
+        if len(text) < 50 or is_garbage_text:
+            print(f"Phát hiện trang {real_page_number} là ảnh hoặc rác. Gọi Gemini Flash đọc ảnh...")
+            try:
+                # Trích xuất trang thành hình ảnh độ phân giải cao
+                pix = page.get_pixmap(dpi=200)
+                img_data = pix.tobytes("png")
+                img = Image.open(io.BytesIO(img_data))
+                
+                # Nhờ Gemini làm đôi mắt để đọc ảnh (OCR Chuẩn xác 100%)
+                prompt = "Hãy trích xuất chính xác toàn bộ văn bản tiếng Việt từ bức ảnh này. Giữ nguyên định dạng đoạn văn, không giải thích gì thêm. Chỉ in ra văn bản."
+                response = genai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[img, prompt]
+                )
+                if response and response.text:
+                    text = response.text.strip()
+                else:
+                    text = "" # Cho text rỗng để vòng lặp tự động bỏ qua trang này
+                    print(f"Cảnh báo: AI trả về rỗng ở trang {real_page_number} (Có thể là trang trắng hoặc bị bộ lọc an toàn chặn).")
+                    
+            except Exception as e:
+                print(f"Lỗi khi nhờ AI đọc ảnh trang {real_page_number}: {str(e)}")
+                continue 
+        else:
+            print(f"Nạp trang {real_page_number} (Văn bản sạch, cực nhanh)...")
+
+        if not text:
+            continue
         
         try:
             # Cho Docling đọc file tạm (rất nhẹ, không bao giờ sập)
-            llama_docs = reader.load_data(file_path=temp_filename)
-            nodes = parser.get_nodes_from_documents(llama_docs)
+            llama_doc = LlamaDocument(text=text, metadata={"page_number": real_page_number})
+            nodes = parser.get_nodes_from_documents([llama_doc])
             
             for node in nodes:
-                # Tính toán lại số trang gốc cho chuẩn xác
-                page_str = node.metadata.get("page_label") or node.metadata.get("page_number")
-                page_num = int(page_str) if page_str and str(page_str).isdigit() else 1
-                real_page_number = start_page + page_num
-                
                 # Lưu Text vào PostgreSQL
                 new_chunk = models.DocumentChunk(
                     document_id=new_doc.id,
@@ -120,6 +143,10 @@ def ingest_pdf(file_path: str, title: str):
                 db.add(new_chunk)
                 db.commit()
                 db.refresh(new_chunk)
+
+                # Nếu chạy script 100 lần, ID này vẫn giữ nguyên -> Qdrant sẽ chỉ Ghi đè (Upsert)
+                raw_id_string = f"doc_{title}_page_{real_page_number}_chunk_{chunk_index_counter}"
+                node.id_ = str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_id_string))
                 
                 # Gắn Metadata để LlamaIndex tìm kiếm
                 node.metadata["pg_chunk_id"] = new_chunk.id
@@ -129,18 +156,15 @@ def ingest_pdf(file_path: str, title: str):
                 
                 chunk_index_counter += 1
 
-            # Đẩy cục Vector 5 trang này vào DB ngay lập tức
             if nodes:
                 index.insert_nodes(nodes)
                 
         except Exception as e:
-            print(f"Lỗi ở đoạn {start_page + 1}-{end_page}: {str(e)}")
+            print(f"Lỗi ở trang {real_page_number}: {str(e)}")
         finally:
-            # 4. XÓA FILE TẠM VÀ ÉP PYTHON XẢ RÁC TRONG RAM
-            if os.path.exists(temp_filename):
-                os.remove(temp_filename)
             gc.collect() # chống tràn RAM
 
+    pdf_document.close()
     print(f"HOÀN TẤT! Đã nạp xong toàn bộ '{title}'.")
     db.close()
 
@@ -155,7 +179,7 @@ def process_all_pdfs_in_folder(folder_path: str):
         print(f"Không tìm thấy file PDF nào trong thư mục '{folder_path}'")
         return
 
-    print(f"Tìm thấy {len(pdf_files)} cuốn sách. Bắt đầu pipeline xử lý hàng loạt...\n")
+    print(f"Tìm thấy {len(pdf_files)} cuốn sách. Bắt đầu đẩy lên Cloud...\n")
     
     for file_path in pdf_files:
         # Lấy tên file làm tiêu đề sách (ví dụ: "Đạo_Mẫu.pdf" -> "Đạo_Mẫu")
@@ -174,7 +198,6 @@ def process_all_pdfs_in_folder(folder_path: str):
 # 4. CHẠY SCRIPT
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    from database import engine
     models.Base.metadata.create_all(bind=engine)
 
     # Tên thư mục chứa sách

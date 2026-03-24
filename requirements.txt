@@ -8,5 +8,6 @@ llama-index-vector-stores-qdrant
 llama-index-embeddings-google-genai
 google-genai 
 qdrant-client
-PyPDF2
+PyMuPDF 
+Pillow
 python-dotenv

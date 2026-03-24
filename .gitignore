@@ -33,6 +33,8 @@ __pycache__/
 *.pyc
 *.ipynb
 questions.txt
+artisans_data.csv
+
 
 
 

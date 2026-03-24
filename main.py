@@ -3,7 +3,9 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import os
 import shutil
+import uuid 
 from fastapi.responses import StreamingResponse
+from qdrant_client import models as qdrant_models
 
 # LlamaIndex & Cloud Vector DB Imports
 from llama_index.core import Settings, VectorStoreIndex, StorageContext, Document as LlamaDocument
@@ -13,9 +15,13 @@ from llama_index.core.vector_stores import MetadataFilters, MetadataFilter, Filt
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 import google.genai as genai
+from google.genai import types as genai_types
+from google.genai.types import Content, Part
 
 # Lightweight PDF Reader cho Serverless
-from PyPDF2 import PdfReader
+import io
+from PIL import Image
+import fitz
 from dotenv import load_dotenv
 
 import models
@@ -33,7 +39,7 @@ app = FastAPI(title="Thờ Mẫu RAG API")
 # ---------------------------------------------------------
 # Cấu hình API Key cho toàn bộ SDK của Google
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Khởi tạo Embedding model của Gemini
 Settings.embed_model = GoogleGenAIEmbedding(
@@ -48,6 +54,16 @@ qdrant_url = os.getenv("QDRANT_URL")
 qdrant_api_key = os.getenv("QDRANT_API_KEY")
 client = qdrant_client.QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
 
+try:
+    client.create_payload_index(
+        collection_name="thomau_collection",
+        field_name="owner",
+        field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+    )
+except Exception as e:
+    # Nếu Index đã được tạo từ lần chạy trước, nó sẽ báo lỗi, ta cứ thản nhiên bỏ qua
+    pass
+
 vector_store = QdrantVectorStore(client=client, collection_name="thomau_collection")
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
@@ -60,7 +76,7 @@ index = VectorStoreIndex.from_vector_store(vector_store, embed_model=Settings.em
 class ChatRequest(BaseModel):
     user_id: str     # Nhận diện chính xác Người dùng (Tài khoản/SĐT/Email)
     session_id: str  # ID của phiên chat hiện tại
-    artisan_id: int  # Đang chat với Nghệ nhân nào
+    artisan_id: str  # Đang chat với Nghệ nhân nào
     user_query: str
 
 # Dependency lấy DB session
@@ -127,8 +143,9 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
     
     for log in history_logs:
         history_text += f"User: {log.user_query}\nAI: {log.ai_initial_response}\n"
-        messages_for_gemini.append({"role": "user", "parts": [log.user_query]})
-        messages_for_gemini.append({"role": "model", "parts": [log.ai_initial_response]})
+        # Bọc chữ bằng Part.from_text, sau đó bọc thành Content
+        messages_for_gemini.append(Content(role="user", parts=[Part.from_text(text=log.user_query)]))
+        messages_for_gemini.append(Content(role="model", parts=[Part.from_text(text=log.ai_initial_response)]))
 
     # ---------------------------------------------------------
     # BƯỚC 2: VIẾT LẠI CÂU HỎI (NẾU CÓ LỊCH SỬ) ĐỂ TÌM KIẾM VECTOR
@@ -143,11 +160,13 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
         )
         
         # Gọi Gemini 1 nhịp nhanh để rewrite (Tốn vài mili-giây)
-        rewrite_model = genai.GenerativeModel('gemini-2.0-flash')
-        rewrite_response = rewrite_model.generate_content(rewrite_prompt)
-        search_query = rewrite_response.text.strip()
-
-        print(f"🔍 [LOG] Câu hỏi gốc: '{original_query}' -> Viết lại thành: '{search_query}'")
+        rewrite_response = genai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=rewrite_prompt
+        )
+        if rewrite_response and rewrite_response.text:
+            search_query = rewrite_response.text.strip()
+            print(f"[LOG] Câu hỏi gốc: '{original_query}' -> Viết lại thành: '{search_query}'")
 
    # ==========================================
     # BƯỚC 3: BỘ LỌC ĐA KHÁCH THUÊ (MULTI-TENANT)
@@ -216,38 +235,38 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
         f"--- THÔNG TIN THAM KHẢO ---\n{joined_context}\n--------------------------"
     )
     
-    # Khởi tạo model Gemini với System Prompt
-    gemini_model = genai.GenerativeModel(
-        model_name="gemini-2.5-pro",
-        system_instruction=system_instruction
-    )
-    
     # Đẩy câu hỏi mới nhất vào mảng
-    messages_for_gemini.append({"role": "user", "parts": [original_query]})
+    messages_for_gemini.append(Content(role="user", parts=[Part.from_text(text=original_query)]))
     
     # Bật tính năng truyền phát trực tiếp (Stream)
-    response_stream = gemini_model.generate_content(
-        messages_for_gemini,
-        generation_config=genai.types.GenerationConfig(
+    response_stream = genai_client.models.generate_content_stream(
+        model="gemini-2.5-pro",
+        contents=messages_for_gemini,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=system_instruction,
             max_output_tokens=1000,
-            temperature=0.3 # Tối ưu hóa tính cách Nghệ nhân
-        ),
-        stream=True
+            temperature=0.3 
+        )
     )
     
     # Hàm Generator xử lý Stream và Lưu Background
     async def stream_generator():
         full_ai_answer = ""
-        for chunk in response_stream:
-            if chunk.text:
-                full_ai_answer += chunk.text
-                yield chunk.text
-                
-        # Sau khi truyền hết chữ cho Frontend, tiến hành lưu DB
-        save_background_logs(
-            db, user_id, session_id, artisan_id,
-            original_query, search_query, full_ai_answer, saved_context_metadata
-        )
+        try:
+            for chunk in response_stream:
+                if chunk.text:
+                    full_ai_answer += chunk.text
+                    yield chunk.text
+                    
+            # Nếu thành công trọn vẹn thì lưu log
+            background_tasks.add_task(
+                save_background_logs, db, user_id, session_id, artisan_id,
+                original_query, search_query, full_ai_answer, saved_context_metadata
+            )
+        except Exception as e:
+            # Nếu Google sập giữa chừng, Sư phụ sẽ nói câu này:
+            error_msg = "\n\n(Dạ thưa, hiện tại tâm linh đang nhiễu loạn, Sư phụ cần nghỉ ngơi một lát. Xin con quay lại sau ít phút nhé!)"
+            yield error_msg
     
     return StreamingResponse(stream_generator(), media_type="text/plain")
 
@@ -256,7 +275,7 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
 # =========================================================
 
 @app.get("/api/artisan/{artisan_id}/questions")
-async def get_pending_questions(artisan_id: int, db: Session = Depends(get_db)):
+async def get_pending_questions(artisan_id: str, db: Session = Depends(get_db)):
     """
     API 1: Khi Nghệ nhân mở App, AI C gọi API này để lấy danh sách câu hỏi đang chờ.
     """
@@ -281,9 +300,9 @@ async def get_pending_questions(artisan_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/artisan/{artisan_id}/answer")
 async def submit_artisan_answer(
-    artisan_id: int,
+    artisan_id: str,
     background_tasks: BackgroundTasks,
-    interview_id: int = Form(...),
+    interview_id: str = Form(...),
     answer_text: str | None = Form(None),
     upload_file: UploadFile | None = File(None),
     db: Session = Depends(get_db)
@@ -326,7 +345,6 @@ async def submit_artisan_answer(
     # ---------------------------------------------------------
     if answer_text:
         # Gọi Gemini (AI C) vào đánh giá chất lượng câu trả lời
-        eval_model = genai.GenerativeModel('gemini-2.5-flash')
         eval_prompt = (
             f"Bạn là một người phỏng vấn. Bạn đã hỏi Sư phụ câu này: '{task.ai_b_prompt}'\n"
             f"Sư phụ trả lời: '{answer_text}'\n\n"
@@ -334,8 +352,11 @@ async def submit_artisan_answer(
             "Nếu quá ngắn gọn, lấp lửng hoặc chưa rõ ràng, hãy đóng vai Đệ tử ngoan ngoãn, đặt tiếp 1 câu hỏi lễ phép để khai thác sâu hơn. "
             "Nếu câu trả lời đã đủ chi tiết và trọn vẹn, CHỈ CẦN IN RA DUY NHẤT CHỮ 'OK'."
         )
-        eval_response = eval_model.generate_content(eval_prompt)
-        eval_result = eval_response.text.strip()
+        eval_response = genai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=eval_prompt
+        )
+        eval_result = eval_response.text.strip() if eval_response and eval_response.text else "OK"
         
         # LƯU DI SẢN (Dù ngắn hay dài cũng lưu lại để máy học văn phong)
         new_answer = models.ArtisanAnswer(
@@ -376,23 +397,63 @@ async def submit_artisan_answer(
 # ---------------------------------------------------------
 def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, filename: str):
     try:
-        # 1. Đọc text siêu nhẹ bằng PyPDF2 thay vì Docling
-        pdf_reader = PdfReader(file_path)
+        # 1. Khởi tạo client Gemini để gọi model OCR
+        genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        
+        # 2. Mở file PDF bằng PyMuPDF
+        pdf_document = fitz.open(file_path)
         llama_docs = []
         
-        for page_num, page in enumerate(pdf_reader.pages):
-            text = page.extract_text()
+        print(f"Bắt đầu xử lý tài liệu mật '{filename}' của Sư phụ {artisan_id}...")
+
+        for page_idx in range(len(pdf_document)):
+            real_page_number = page_idx + 1
+            page = pdf_document[page_idx]
+            text = page.get_text("text").strip()
+            
+            # Bộ lọc AI: Kiểm tra xem có phải là ảnh scan sách cúng không
+            is_garbage_text = False
+            if len(text) > 0:
+                space_ratio = text.count(' ') / len(text)
+                if space_ratio > 0.25:
+                    is_garbage_text = True
+                    
+            if len(text) < 50 or is_garbage_text:
+                print(f"[Private] Trang {real_page_number} là ảnh. Đang dùng Gemini Flash đọc...")
+                try:
+                    pix = page.get_pixmap(dpi=200)
+                    img_data = pix.tobytes("png")
+                    img = Image.open(io.BytesIO(img_data))
+                    
+                    prompt = "Hãy trích xuất chính xác toàn bộ văn bản tiếng Việt từ bức ảnh này. Giữ nguyên định dạng đoạn văn, không giải thích gì thêm. Chỉ in ra văn bản."
+                    response = genai_client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=[img, prompt]
+                    )
+                    text = response.text.strip()
+                except Exception as e:
+                    print(f"[Private] Lỗi AI đọc ảnh trang {real_page_number}: {str(e)}")
+                    continue
+            else:
+                print(f"[Private] Đã đọc xong văn bản trang {real_page_number}.")
+
             if text and text.strip():
                 llama_docs.append(LlamaDocument(
-                    text=text,
-                    metadata={"page_number": page_num + 1}
+                    text=text, 
+                    metadata={"page_number": real_page_number}
                 ))
+                
+        pdf_document.close()
+
+        if not llama_docs:
+            print("Tài liệu mật bị trống hoặc lỗi. Không có gì để nạp.")
+            return
         
-        # 2. Cắt chunk
+        # 3. Cắt chunk
         parser = SentenceSplitter(chunk_size=512, chunk_overlap=50)
         nodes = parser.get_nodes_from_documents(llama_docs)
         
-        # 3. Lưu vào Supabase PostgreSQL
+        # 4. Lưu vào Supabase PostgreSQL
         new_doc = models.Document(
             title=filename, 
             source_url="artisan_upload",
@@ -404,7 +465,7 @@ def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, fi
         
         # 2. Lưu từng Chunk
         for i, node in enumerate(nodes):
-            page_str = node.metadata.get("page_label") or node.metadata.get("page_number")
+            page_str = node.metadata.get("page_number") or node.metadata.get("page_label")
             page_num = int(page_str) if page_str and str(page_str).isdigit() else None
             
             new_chunk = models.DocumentChunk(
@@ -416,6 +477,10 @@ def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, fi
             db.add(new_chunk)
             db.commit()
             db.refresh(new_chunk)
+
+            # Nếu chạy script 100 lần, ID này vẫn giữ nguyên -> Qdrant sẽ chỉ Ghi đè (Upsert)
+            raw_id_string = f"doc_{filename}_{artisan_id}_page_{real_page_number}_chunk_{i}"
+            node.id_ = str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_id_string))
             
             # GẮN NHÃN BẢN QUYỀN VÀO TỪNG NODE TRONG QDRANT
             node.metadata["pg_chunk_id"] = new_chunk.id

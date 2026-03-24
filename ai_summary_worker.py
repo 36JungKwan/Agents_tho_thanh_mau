@@ -9,9 +9,8 @@ from database import SessionLocal
 
 load_dotenv()
 # Cấu hình Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-# Khởi tạo model Flash (Tối ưu cho tốc độ và chi phí)
-worker_model = genai.GenerativeModel('gemini-2.0-flash')
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def run_ai_b_coordinator():
     db: Session = SessionLocal()
@@ -41,7 +40,7 @@ def run_ai_b_coordinator():
                     "Xưng 'con', gọi 'Thầy/Cô'. Chỉ in ra câu hỏi."
                 )
                 # Gọi Gemini
-                response = worker_model.generate_content(prompt)
+                response = genai_client.models.generate_content(model='gemini-2.5-flash',contents=prompt)
                 polite_prompt = response.text.strip()
                 
                 # Chia cho các Sư phụ
@@ -76,7 +75,7 @@ def run_ai_b_coordinator():
             )
 
             # Gọi Gemini
-            response = worker_model.generate_content(prompt)
+            response = genai_client.models.generate_content(model='gemini-2.5-flash',contents=prompt)
             polite_drafted_prompt = response.text.strip()
             print(f"Đã chuyển ngữ thành: '{polite_drafted_prompt}'")
             
@@ -114,7 +113,7 @@ def run_ai_b_coordinator():
             )
             
             # Gọi Gemini
-            response = worker_model.generate_content(book_prompt)
+            response = genai_client.models.generate_content(model='gemini-2.5-flash',contents=book_prompt)
             polite_book_prompt = response.text.strip()
             print(f"Câu hỏi khơi gợi: '{polite_book_prompt}'")
             

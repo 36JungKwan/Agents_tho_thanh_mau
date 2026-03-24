@@ -9,10 +9,8 @@ from database import SessionLocal
 load_dotenv()
 
 # Cấu hình Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# Sử dụng gemini-2.5-flash: Đọc ngữ cảnh siêu dài, siêu tốc độ và cực rẻ
-profiler_model = genai.GenerativeModel('gemini-2.5-flash')
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+genai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def run_ai_profiler():
     db: Session = SessionLocal()
@@ -52,8 +50,12 @@ def run_ai_profiler():
             )
 
             # Gọi Gemini 2.5 Flash thực thi
-            response = profiler_model.generate_content(profiler_prompt)
-            profile_result = response.text.strip()
+            response = genai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=profiler_prompt
+            )
+
+            profile_result = response.text.strip() 
             
             # Lưu/Cập nhật đoạn "Khí chất" này vào Database
             artisan.style_profile = profile_result
