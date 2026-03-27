@@ -18,7 +18,9 @@ from llama_index.core.node_parser import SentenceSplitter
 import qdrant_client
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
-import google.genai as genai
+
+# API Key Rotation Manager
+from api_key_manager import key_manager
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -31,14 +33,10 @@ load_dotenv()
 # ---------------------------------------------------------
 print("Đang kết nối với Qdrant Cloud và Gemini...")
 
-# 1.1 Cấu hình API Key cho toàn bộ SDK của Google
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
-
-# Khởi tạo Embedding model của Gemini
+# 1.1 Khởi tạo Embedding model với API key xoay vòng
 Settings.embed_model = GoogleGenAIEmbedding(
     model_name="models/gemini-embedding-001", 
-    api_key=GEMINI_API_KEY,
+    api_key=key_manager.get_next_key(),
     text_task_type="RETRIEVAL_DOCUMENT"
 )
 
@@ -108,7 +106,7 @@ def ingest_pdf(file_path: str, title: str):
                 
                 # Nhờ Gemini làm đôi mắt để đọc ảnh (OCR Chuẩn xác 100%)
                 prompt = "Hãy trích xuất chính xác toàn bộ văn bản tiếng Việt từ bức ảnh này. Giữ nguyên định dạng đoạn văn, không giải thích gì thêm. Chỉ in ra văn bản."
-                response = genai_client.models.generate_content(
+                response = key_manager.generate_with_retry(
                     model='gemini-2.5-flash',
                     contents=[img, prompt]
                 )
