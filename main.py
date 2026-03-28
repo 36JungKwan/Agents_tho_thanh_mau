@@ -252,24 +252,46 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
         stream=True
     )
     
-    # Hàm Generator xử lý Stream và Lưu Background
+    # Hàm Generator xử lý Stream THẬT SỰ (từng chunk một, như ChatGPT)
     async def stream_generator():
+        import asyncio
         full_ai_answer = ""
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        # Chạy Gemini stream trong thread riêng để KHÔNG block event loop
+        def _consume_stream():
+            try:
+                for chunk in response_stream:
+                    if chunk.text:
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk.text)
+                loop.call_soon_threadsafe(queue.put_nowait, None)  # Báo hiệu kết thúc
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, ("__ERROR__", e))
+
+        # Bắn thread chạy ngầm
+        loop.run_in_executor(None, _consume_stream)
+
         try:
-            for chunk in response_stream:
-                if chunk.text:
-                    full_ai_answer += chunk.text
-                    yield chunk.text
-                    
-            # Nếu thành công trọn vẹn thì lưu log
+            while True:
+                item = await queue.get()  # await = KHÔNG block event loop
+
+                if item is None:
+                    break  # Stream hoàn tất
+
+                if isinstance(item, tuple) and item[0] == "__ERROR__":
+                    raise item[1]
+
+                full_ai_answer += item
+                yield item  # GỬI NGAY cho client (streaming thật)
+
+            # Lưu log sau khi stream xong
             background_tasks.add_task(
                 save_background_logs, db, user_id, session_id, artisan_id,
                 original_query, search_query, full_ai_answer, saved_context_metadata
             )
         except Exception as e:
-            # In lỗi thật ra terminal để debug
             print(f"[STREAM ERROR] Lỗi khi stream từ Gemini: {type(e).__name__}: {str(e)}")
-            # Nếu Google sập giữa chừng, Sư phụ sẽ nói câu này:
             error_msg = "\n\n(Dạ thưa, hiện tại tâm linh đang nhiễu loạn, Sư phụ cần nghỉ ngơi một lát. Xin con quay lại sau ít phút nhé!)"
             yield error_msg
     
@@ -278,7 +300,7 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # Tắt buffer cho Nginx nếu dùng reverse proxy
+            "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         }
     )
