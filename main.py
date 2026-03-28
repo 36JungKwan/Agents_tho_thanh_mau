@@ -92,7 +92,7 @@ def get_db():
 # ---------------------------------------------------------
 # 3. TASK CHẠY NGẦM: LƯU LOG & BẮT CÂU HỎI KHÓ
 # ---------------------------------------------------------
-def save_background_logs(db: Session, user_id: str, session_id: str, artisan_id: int, original_query: str, search_query: str, ai_answer: str, context_metadata: list):
+def save_background_logs(db: Session, user_id: str, session_id: str, artisan_id: str, original_query: str, search_query: str, ai_answer: str, context_metadata: list):
     # 1. Lưu vào ChatLogs (Vẫn lưu câu gốc để giữ nguyên lịch sử chat tự nhiên)
     new_log = models.ChatLog(
         user_id=user_id,
@@ -430,7 +430,7 @@ async def submit_artisan_answer(
 # ---------------------------------------------------------
 # HÀM CHẠY NGẦM: BÓC TÁCH FILE PDF RIÊNG CỦA NGHỆ NHÂN
 # ---------------------------------------------------------
-def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, filename: str):
+def process_artisan_private_pdf(db: Session, artisan_id: str, file_path: str, filename: str):
     try:
         # 1. Sử dụng key_manager để xoay key khi OCR
         

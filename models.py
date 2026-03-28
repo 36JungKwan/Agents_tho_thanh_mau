@@ -1,29 +1,43 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, JSON
-from sqlalchemy.orm import declarative_base, relationship
-import datetime
 import uuid
+import datetime
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, JSON, Uuid
+from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
 def get_vn_time():
-    # Tạo múi giờ tĩnh +7 (Asia/Ho_Chi_Minh)
     vn_timezone = datetime.timezone(datetime.timedelta(hours=7))
     return datetime.datetime.now(vn_timezone)
 
 # ==========================================
-# 1. BẢNG NGHỆ NHÂN (Danh sách các Sư phụ)
+# PHẦN 1: ÁNH XẠ CÁC BẢNG ĐÃ CÓ TRONG DB CHÍNH
+# (Khai báo để làm Khóa ngoại, không ảnh hưởng data cũ)
 # ==========================================
-class Artisan(Base):
-    __tablename__ = "artisans"
+
+class User(Base):
+    __tablename__ = "users" # Tên chuẩn trong DB chính
     
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = Column(String, index=True)
-    bio = Column(Text) # Giới thiệu ngắn, dùng để mớm tính cách cho AI A và AI C
-    style_profile = Column(Text, nullable=True) # CHứa khí chất của nghệ nhân và sẽ được cập nhật thường xuyên
+    # Cột String (VARCHAR) theo đúng thiết kế db chính thức
+    id = Column(String, primary_key=True) 
+    name = Column(String, nullable=True)
+    email = Column(String, unique=True, nullable=True)
+    # (Các cột khác của DB chính vẫn an toàn, không cần khai báo hết ở đây)
+
+class Artisan(Base):
+    __tablename__ = "artists" # Trỏ đúng vào bảng artists
+    
+    # DB chính dùng UUID native
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    userid = Column(String, ForeignKey("users.id"), nullable=True) 
+    
+    # 2 Cột AI RAG
+    bio = Column(Text, nullable=True) 
+    style_profile = Column(Text, nullable=True)
 
 # ==========================================
-# 2. BẢNG TÀI LIỆU & ĐOẠN VĂN (Kiến thức)
+# PHẦN 2: CÁC BẢNG CỦA HỆ THỐNG RAG (Sẽ tự động tạo mới)
 # ==========================================
+
 class Document(Base):
     __tablename__ = "documents"
     
@@ -31,10 +45,8 @@ class Document(Base):
     title = Column(String, index=True)
     source_url = Column(String)
     
-    # ĐIỂM SÁNG TRONG KIẾN TRÚC:
-    # Nếu owner_id = NULL -> Sách phổ thông, ai cũng được học.
-    # Nếu owner_id = ID Nghệ nhân -> Tài liệu mật, chỉ AI A của người đó được truy cập.
-    owner_id = Column(String, ForeignKey("artisans.id"), nullable=True) 
+    # TRỎ VỀ ARTISTS: Dùng Uuid
+    owner_id = Column(Uuid(as_uuid=True), ForeignKey("artists.id"), nullable=True) 
     created_at = Column(DateTime(timezone=True), default=get_vn_time)
 
 class DocumentChunk(Base):
@@ -42,82 +54,70 @@ class DocumentChunk(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     document_id = Column(String, ForeignKey("documents.id"))
-    chunk_text = Column(Text, nullable=False) # Nội dung đoạn text
-    page_number = Column(Integer, nullable=True) # Nằm ở trang nào trong PDF
-    chunk_index = Column(Integer) # Thứ tự của chunk trong sách
+    chunk_text = Column(Text, nullable=False) 
+    page_number = Column(Integer, nullable=True) 
+    chunk_index = Column(Integer) 
     
-# ==========================================
-# 3. BẢNG LOG NGƯỜI DÙNG CHAT (Tương tác với AI A)
-# ==========================================
 class ChatLog(Base):
     __tablename__ = "chat_logs"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, index=True) 
-    session_id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()), index=True) # ID phiên chat của user
-    artisan_id = Column(String, ForeignKey("artisans.id")) # Người dùng đang chat với Bản sao của Nghệ nhân nào?
-    user_query = Column(Text, nullable=False) # Câu hỏi: "Hầu đồng là gì?"
     
-    # Lưu lại chính xác những chunks nào đã được RAG kéo ra làm context
-    # Lưu dưới dạng JSON list các DocumentChunk IDs hoặc text trực tiếp
+    # TRỎ VỀ USER CHÍNH THỨC: Dùng String + ForeignKey BẮT BUỘC
+    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False) 
+    
+    session_id = Column(String, default=lambda: str(uuid.uuid4()), index=True) 
+    
+    # TRỎ VỀ ARTISTS: Dùng Uuid
+    artisan_id = Column(Uuid(as_uuid=True), ForeignKey("artists.id"), nullable=False) 
+    
+    user_query = Column(Text, nullable=False) 
     retrieved_context = Column(JSON, nullable=True) 
-    
-    ai_initial_response = Column(Text, nullable=False) # Câu trả lời gốc của Gemini
+    ai_initial_response = Column(Text, nullable=False) 
     created_at = Column(DateTime(timezone=True), default=get_vn_time)
 
-# ==========================================
-# 4. BỂ CÂU HỎI CHUNG (Nơi AI A ném câu hỏi khó vào)
-# ==========================================
 class GlobalUnansweredQuestion(Base):
     __tablename__ = "global_unanswered_questions"
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, index=True)
+    
+    # TRỎ VỀ USER CHÍNH THỨC
+    user_id = Column(String, ForeignKey("users.id"), index=True, nullable=False)
+    
     user_query = Column(Text)
     session_id = Column(String)
-    
-    # Biến cờ: Đánh dấu xem con AI B (Tổng biên tập) đã quét qua câu này chưa
     is_processed_by_ai_b = Column(Boolean, default=False) 
     created_at = Column(DateTime(timezone=True), default=get_vn_time)
 
-# ==========================================
-# 5. HỘP THƯ PHỎNG VẤN (Nơi AI C lấy bài đi hỏi Sư phụ)
-# ==========================================
 class InterviewQueue(Base):
     __tablename__ = "interview_queue"
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    artisan_id = Column(String, ForeignKey("artisans.id")) # Gửi cho Nghệ nhân nào?
+    
+    # TRỎ VỀ ARTISTS: Dùng Uuid
+    artisan_id = Column(Uuid(as_uuid=True), ForeignKey("artists.id")) 
     question_id = Column(String, ForeignKey("global_unanswered_questions.id"))
     
-    # Câu hỏi đã được AI B viết lại cho mềm mại, kính trọng (Ví dụ: "Dạ thưa thầy...")
-    ai_b_prompt = Column(Text)
-    
-    # Trạng thái: pending (chờ hỏi), answered (đã trả lời), skipped (thầy từ chối trả lời)
-    status = Column(String, default="pending")
+    ai_b_prompt = Column(Text) 
+    status = Column(String, default="pending") 
     created_at = Column(DateTime(timezone=True), default=get_vn_time)
 
-# ==========================================
-# 6. DI SẢN KIẾN THỨC (Câu trả lời của Nghệ nhân)
-# ==========================================
 class ArtisanAnswer(Base):
     __tablename__ = "artisan_answers"
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     interview_id = Column(String, ForeignKey("interview_queue.id"))
-    artisan_id = Column(String, ForeignKey("artisans.id"))
     
-    # Text mà App (AI C) nhận được (Gõ phím hoặc Ghi âm chuyển thành Text)
+    # TRỎ VỀ ARTISTS: Dùng Uuid
+    artisan_id = Column(Uuid(as_uuid=True), ForeignKey("artists.id"))
+    
     answer_text = Column(Text) 
     created_at = Column(DateTime(timezone=True), default=get_vn_time)
 
-# ==========================================
-# 7. NGÂN HÀNG CÂU HỎI SOẠN SẴN (KỊCH BẢN)
-# ==========================================
 class PreDraftedQuestion(Base):
     __tablename__ = "pre_drafted_questions"
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    raw_topic = Column(Text, nullable=False) # Chủ đề thô (VD: "Quy tắc hầu giá Chầu Đệ Nhị")
-    is_used = Column(Boolean, default=False) # Đánh dấu đã bốc ra hỏi chưa
+    raw_topic = Column(Text, nullable=False) 
+    is_used = Column(Boolean, default=False) 
     created_at = Column(DateTime(timezone=True), default=get_vn_time)
