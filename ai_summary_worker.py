@@ -3,14 +3,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.expression import func
 from dotenv import load_dotenv
 
-import google.genai as genai
 import models
 from database import SessionLocal
 
 load_dotenv()
-# Cấu hình Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# API Key Rotation Manager
+from api_key_manager import key_manager
 
 def run_ai_b_coordinator():
     db: Session = SessionLocal()
@@ -40,7 +39,7 @@ def run_ai_b_coordinator():
                     "Xưng 'con', gọi 'Thầy/Cô'. Chỉ in ra câu hỏi."
                 )
                 # Gọi Gemini
-                response = genai_client.models.generate_content(model='gemini-2.5-flash',contents=prompt)
+                response = key_manager.generate_with_retry(model='gemini-2.5-flash', contents=prompt)
                 polite_prompt = response.text.strip()
                 
                 # Chia cho các Sư phụ
@@ -75,7 +74,7 @@ def run_ai_b_coordinator():
             )
 
             # Gọi Gemini
-            response = genai_client.models.generate_content(model='gemini-2.5-flash',contents=prompt)
+            response = key_manager.generate_with_retry(model='gemini-2.5-flash', contents=prompt)
             polite_drafted_prompt = response.text.strip()
             print(f"Đã chuyển ngữ thành: '{polite_drafted_prompt}'")
             
@@ -113,7 +112,7 @@ def run_ai_b_coordinator():
             )
             
             # Gọi Gemini
-            response = genai_client.models.generate_content(model='gemini-2.5-flash',contents=book_prompt)
+            response = key_manager.generate_with_retry(model='gemini-2.5-flash', contents=book_prompt)
             polite_book_prompt = response.text.strip()
             print(f"Câu hỏi khơi gợi: '{polite_book_prompt}'")
             

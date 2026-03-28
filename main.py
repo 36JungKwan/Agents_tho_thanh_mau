@@ -34,20 +34,22 @@ models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Thờ Mẫu RAG API")
 
-# ---------------------------------------------------------
-# CẤU HÌNH AI (Gemini & LlamaIndex)
-# ---------------------------------------------------------
-# Cấu hình API Key cho toàn bộ SDK của Google
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
-
-# Khởi tạo Embedding model của Gemini
-Settings.embed_model = GoogleGenAIEmbedding(
-    model_name="models/gemini-embedding-001", 
-    api_key=GEMINI_API_KEY,
-    query_task_type="RETRIEVAL_QUERY", 
-    text_task_type="RETRIEVAL_DOCUMENT"
+# Cho phép Frontend gọi API (CORS)
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+# ---------------------------------------------------------
+# CẤU HÌNH AI (Gemini & LlamaIndex) - SỬ DỤNG KEY ROTATION
+# ---------------------------------------------------------
+from api_key_manager import key_manager
+
+# Khởi tạo Embedding model với API key xoay vòng
+Settings.embed_model = key_manager.get_embed_model()
 
 # Kết nối Qdrant Cloud
 qdrant_url = os.getenv("QDRANT_URL")
@@ -159,8 +161,8 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
             "KHÔNG trả lời câu hỏi. CHỈ in ra câu hỏi đã được viết lại."
         )
         
-        # Gọi Gemini 1 nhịp nhanh để rewrite (Tốn vài mili-giây)
-        rewrite_response = genai_client.models.generate_content(
+        # Gọi Gemini 1 nhịp nhanh để rewrite (Có xoay key tự động)
+        rewrite_response = key_manager.generate_with_retry(
             model='gemini-2.5-flash',
             contents=rewrite_prompt
         )
@@ -238,37 +240,70 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
     # Đẩy câu hỏi mới nhất vào mảng
     messages_for_gemini.append(Content(role="user", parts=[Part.from_text(text=original_query)]))
     
-    # Bật tính năng truyền phát trực tiếp (Stream)
-    response_stream = genai_client.models.generate_content_stream(
+    # Bật tính năng truyền phát trực tiếp (Stream) - CÓ XOAY KEY TỰ ĐỘNG
+    response_stream = key_manager.generate_with_retry(
         model="gemini-2.5-pro",
         contents=messages_for_gemini,
         config=genai_types.GenerateContentConfig(
             system_instruction=system_instruction,
-            max_output_tokens=1000,
+            max_output_tokens=4096,
             temperature=0.3 
-        )
+        ),
+        stream=True
     )
     
-    # Hàm Generator xử lý Stream và Lưu Background
+    # Hàm Generator xử lý Stream THẬT SỰ (từng chunk một, như ChatGPT)
     async def stream_generator():
+        import asyncio
         full_ai_answer = ""
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        # Chạy Gemini stream trong thread riêng để KHÔNG block event loop
+        def _consume_stream():
+            try:
+                for chunk in response_stream:
+                    if chunk.text:
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk.text)
+                loop.call_soon_threadsafe(queue.put_nowait, None)  # Báo hiệu kết thúc
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, ("__ERROR__", e))
+
+        # Bắn thread chạy ngầm
+        loop.run_in_executor(None, _consume_stream)
+
         try:
-            for chunk in response_stream:
-                if chunk.text:
-                    full_ai_answer += chunk.text
-                    yield chunk.text
-                    
-            # Nếu thành công trọn vẹn thì lưu log
+            while True:
+                item = await queue.get()  # await = KHÔNG block event loop
+
+                if item is None:
+                    break  # Stream hoàn tất
+
+                if isinstance(item, tuple) and item[0] == "__ERROR__":
+                    raise item[1]
+
+                full_ai_answer += item
+                yield item  # GỬI NGAY cho client (streaming thật)
+
+            # Lưu log sau khi stream xong
             background_tasks.add_task(
                 save_background_logs, db, user_id, session_id, artisan_id,
                 original_query, search_query, full_ai_answer, saved_context_metadata
             )
         except Exception as e:
-            # Nếu Google sập giữa chừng, Sư phụ sẽ nói câu này:
+            print(f"[STREAM ERROR] Lỗi khi stream từ Gemini: {type(e).__name__}: {str(e)}")
             error_msg = "\n\n(Dạ thưa, hiện tại tâm linh đang nhiễu loạn, Sư phụ cần nghỉ ngơi một lát. Xin con quay lại sau ít phút nhé!)"
             yield error_msg
     
-    return StreamingResponse(stream_generator(), media_type="text/plain")
+    return StreamingResponse(
+        stream_generator(), 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        }
+    )
 
 # =========================================================
 # 5. API CHO AI C (ĐỆ TỬ ẢO TRÊN MOBILE APP CỦA NGHỆ NHÂN)
@@ -352,7 +387,7 @@ async def submit_artisan_answer(
             "Nếu quá ngắn gọn, lấp lửng hoặc chưa rõ ràng, hãy đóng vai Đệ tử ngoan ngoãn, đặt tiếp 1 câu hỏi lễ phép để khai thác sâu hơn. "
             "Nếu câu trả lời đã đủ chi tiết và trọn vẹn, CHỈ CẦN IN RA DUY NHẤT CHỮ 'OK'."
         )
-        eval_response = genai_client.models.generate_content(
+        eval_response = key_manager.generate_with_retry(
             model='gemini-2.5-flash',
             contents=eval_prompt
         )
@@ -397,8 +432,7 @@ async def submit_artisan_answer(
 # ---------------------------------------------------------
 def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, filename: str):
     try:
-        # 1. Khởi tạo client Gemini để gọi model OCR
-        genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        # 1. Sử dụng key_manager để xoay key khi OCR
         
         # 2. Mở file PDF bằng PyMuPDF
         pdf_document = fitz.open(file_path)
@@ -426,7 +460,7 @@ def process_artisan_private_pdf(db: Session, artisan_id: int, file_path: str, fi
                     img = Image.open(io.BytesIO(img_data))
                     
                     prompt = "Hãy trích xuất chính xác toàn bộ văn bản tiếng Việt từ bức ảnh này. Giữ nguyên định dạng đoạn văn, không giải thích gì thêm. Chỉ in ra văn bản."
-                    response = genai_client.models.generate_content(
+                    response = key_manager.generate_with_retry(
                         model='gemini-2.5-flash',
                         contents=[img, prompt]
                     )

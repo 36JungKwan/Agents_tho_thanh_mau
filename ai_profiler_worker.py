@@ -2,15 +2,13 @@ import os
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 
-import google.genai as genai
 import models
 from database import SessionLocal
 
 load_dotenv()
 
-# Cấu hình Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
+# API Key Rotation Manager
+from api_key_manager import key_manager
 
 def run_ai_profiler():
     db: Session = SessionLocal()
@@ -50,7 +48,7 @@ def run_ai_profiler():
             )
 
             # Gọi Gemini 2.5 Flash thực thi
-            response = genai_client.models.generate_content(
+            response = key_manager.generate_with_retry(
                 model='gemini-2.5-flash',
                 contents=profiler_prompt
             )

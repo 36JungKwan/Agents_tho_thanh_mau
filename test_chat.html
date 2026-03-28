@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Test Streaming Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .chat-container {
+            width: 600px;
+            background: #16213e;
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #e94560, #0f3460);
+            padding: 16px 24px;
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .chat-messages {
+            padding: 20px;
+            min-height: 300px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .message {
+            margin-bottom: 16px;
+            line-height: 1.6;
+        }
+
+        .message.user {
+            color: #53c0f0;
+        }
+
+        .message.ai {
+            color: #f0e68c;
+            white-space: pre-wrap;
+        }
+
+        .message .label {
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .chat-input {
+            display: flex;
+            padding: 16px;
+            border-top: 1px solid #2a2a4a;
+        }
+
+        .chat-input input {
+            flex: 1;
+            padding: 12px 16px;
+            border: none;
+            border-radius: 8px;
+            background: #0f3460;
+            color: #eee;
+            font-size: 15px;
+            outline: none;
+        }
+
+        .chat-input button {
+            margin-left: 8px;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            background: #e94560;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 15px;
+        }
+
+        .chat-input button:disabled {
+            opacity: 0.5;
+        }
+
+        .typing {
+            color: #888;
+            font-style: italic;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="chat-container">
+        <div class="chat-header">🙏 Test Streaming Chat - Đạo Mẫu</div>
+        <div class="chat-messages" id="messages"></div>
+        <div class="chat-input">
+            <input type="text" id="userInput" placeholder="Hỏi Sư phụ..."
+                onkeydown="if(event.key==='Enter') sendMessage()">
+            <button id="sendBtn" onclick="sendMessage()">Gửi</button>
+        </div>
+    </div>
+
+    <script>
+        // ĐỔI artisan_id CHO ĐÚNG VỚI DB CỦA BẠN
+        const CONFIG = {
+            apiUrl: "http://localhost:8000/api/chat",
+            user_id: "user_001",
+            session_id: "session_abc123" + Date.now(),
+            artisan_id: "19de79a9-e07c-461e-90cc-9f9581d12cda"
+        };
+
+        async function sendMessage() {
+            const input = document.getElementById("userInput");
+            const btn = document.getElementById("sendBtn");
+            const query = input.value.trim();
+            if (!query) return;
+
+            // Hiển thị câu hỏi user
+            addMessage("user", "🧑 Bạn", query);
+            input.value = "";
+            btn.disabled = true;
+
+            // Tạo div cho AI response
+            const aiDiv = addMessage("ai", "🧙 Sư phụ", "");
+            const contentSpan = aiDiv.querySelector(".content");
+
+            try {
+                // GỌI API VỚI STREAMING (fetch + ReadableStream)
+                const response = await fetch(CONFIG.apiUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        user_id: CONFIG.user_id,
+                        session_id: CONFIG.session_id,
+                        artisan_id: CONFIG.artisan_id,
+                        user_query: query
+                    })
+                });
+
+                // Đọc stream từng chunk (giống ChatGPT)
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const text = decoder.decode(value, { stream: true });
+                    contentSpan.textContent += text;  // Hiện từng chữ
+
+                    // Auto scroll xuống
+                    const msgs = document.getElementById("messages");
+                    msgs.scrollTop = msgs.scrollHeight;
+                }
+            } catch (err) {
+                contentSpan.textContent = "❌ Lỗi kết nối: " + err.message;
+            }
+
+            btn.disabled = false;
+            input.focus();
+        }
+
+        function addMessage(type, label, text) {
+            const msgs = document.getElementById("messages");
+            const div = document.createElement("div");
+            div.className = "message " + type;
+            div.innerHTML = `<div class="label">${label}</div><span class="content">${text}</span>`;
+            msgs.appendChild(div);
+            msgs.scrollTop = msgs.scrollHeight;
+            return div;
+        }
+    </script>
+</body>
+
+</html>
