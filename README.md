@@ -108,10 +108,15 @@ python ingest.py
 # Processes PDFs from data_sach/ into vector database
 ```
 
-### Step 3: Import Question Scenarios
+### Step 3: Import Question & Artists Scenarios
 ```bash
 python import_questions.py
 # Loads questions from questions.txt
+```
+
+```bash
+python import_artisans.py
+# Loads artisans from artisans_data.csv
 ```
 
 ### Step 4: Start API Server
