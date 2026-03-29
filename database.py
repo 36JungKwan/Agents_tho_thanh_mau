@@ -24,10 +24,11 @@ SQLALCHEMY_DATABASE_URL = f"postgresql://{db_user}:{safe_password}@{db_host}:{db
 # Khởi tạo Engine (Bộ máy kết nối)
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
-    pool_pre_ping=True,      # BẮT BUỘC: Kiểm tra kết nối có bị Supabase/Render ngắt ngầm không trước khi dùng
-    pool_recycle=300,        # Làm mới kết nối sau mỗi 5 phút (300 giây) để tránh timeout
-    pool_size=5,             # Giữ tối đa 5 kết nối mở cùng lúc (phù hợp gói Free của Supabase)
-    max_overflow=10          # Cho phép phình ra thêm 10 kết nối lúc cao điểm
+    pool_pre_ping=True,      # Kiểm tra kết nối trước khi dùng
+    pool_recycle=300,        # Làm mới kết nối sau 5 phút
+    pool_size=3,             # Giữ nhỏ để không vượt giới hạn Supabase Session Mode (~10 max)
+    max_overflow=5,          # Tổng tối đa 8 connections (3+5), dưới giới hạn Supabase
+    pool_timeout=30          # Timeout 30s nếu không lấy được connection
 )
 
 # Tạo Session (Phiên làm việc để truy vấn)

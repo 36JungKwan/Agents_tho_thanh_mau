@@ -118,36 +118,62 @@ def save_background_logs(db: Session, user_id: str, session_id: str, artisan_id:
         
     db.commit()
 
+# Phiên bản standalone: Tự tạo và đóng DB session (dùng cho endpoint đã đóng session sớm)
+def save_background_logs_standalone(user_id: str, session_id: str, artisan_id: str, original_query: str, search_query: str, ai_answer: str, context_metadata: list):
+    db = SessionLocal()
+    try:
+        save_background_logs(db, user_id, session_id, artisan_id, original_query, search_query, ai_answer, context_metadata)
+    except Exception as e:
+        print(f"[LOG ERROR] Lỗi khi lưu log: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
 # ---------------------------------------------------------
 # 4. API CHÍNH: BẢN SAO SỐ AI A TRẢ LỜI NGƯỜI DÙNG (CÓ TRÍ NHỚ)
 # ---------------------------------------------------------
 @app.post("/api/chat")
-async def chat_with_artisan_twin(request: ChatRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def chat_with_artisan_twin(request: ChatRequest, background_tasks: BackgroundTasks):
     original_query = request.user_query
     session_id = request.session_id
     user_id = request.user_id
     artisan_id = request.artisan_id
     
     # ==========================================
-    # BƯỚC 1: LẤY LỊCH SỬ TRÒ CHUYỆN (TRÍ NHỚ)
+    # BƯỚC 0: QUERY DB NHANH RỒI ĐÓNG NGAY (Không giữ connection chờ Gemini)
     # ==========================================
-    # Chỉ lấy lịch sử của user này với ĐÚNG vị Nghệ nhân này
-    history_logs = db.query(models.ChatLog).filter(
-        models.ChatLog.session_id == user_id,
-        models.ChatLog.session_id == session_id,
-        models.ChatLog.artisan_id == artisan_id
-    ).order_by(models.ChatLog.created_at.desc()).limit(4).all()
+    db = SessionLocal()
+    try:
+        history_logs = db.query(models.ChatLog).filter(
+            models.ChatLog.user_id == user_id,
+            models.ChatLog.session_id == session_id,
+            models.ChatLog.artisan_id == artisan_id
+        ).order_by(models.ChatLog.created_at.desc()).limit(4).all()
+        
+        history_logs = history_logs[::-1]
+        
+        # Extract ra biến Python thuần trước khi đóng session
+        history_data = [{"query": log.user_query, "response": log.ai_initial_response} for log in history_logs]
+        
+        # Query artisan luôn
+        artisan = db.query(models.Artisan).filter(models.Artisan.id == request.artisan_id).first()
+        if not artisan:
+            raise HTTPException(status_code=404, detail="Không tìm thấy Nghệ nhân này trong hệ thống!")
+        
+        artisan_name = "Sư phụ"
+        artisan_bio = artisan.bio if artisan.bio else "Một bậc thầy am hiểu sâu sắc về Tín ngưỡng Thờ Mẫu."
+        core_persona = artisan.style_profile if artisan.style_profile else "Nói chuyện từ tốn, uy nghiêm nhưng gần gũi."
+    finally:
+        db.close()  # ĐÓNG NGAY! Trả connection về pool cho request khác
     
-    history_logs = history_logs[::-1] # Đảo ngược từ cũ đến mới
-    
+    # Xây dựng history từ data đã extract
     history_text = ""
     messages_for_gemini = []
     
-    for log in history_logs:
-        history_text += f"User: {log.user_query}\nAI: {log.ai_initial_response}\n"
-        # Bọc chữ bằng Part.from_text, sau đó bọc thành Content
-        messages_for_gemini.append(Content(role="user", parts=[Part.from_text(text=log.user_query)]))
-        messages_for_gemini.append(Content(role="model", parts=[Part.from_text(text=log.ai_initial_response)]))
+    for h in history_data:
+        history_text += f"User: {h['query']}\nAI: {h['response']}\n"
+        messages_for_gemini.append(Content(role="user", parts=[Part.from_text(text=h['query'])]))
+        messages_for_gemini.append(Content(role="model", parts=[Part.from_text(text=h['response'])]))
 
     # ---------------------------------------------------------
     # BƯỚC 2: VIẾT LẠI CÂU HỎI (NẾU CÓ LỊCH SỬ) ĐỂ TÌM KIẾM VECTOR
@@ -215,15 +241,7 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
     # ==========================================
     # BƯỚC 5: GỌI Gemini TRẢ LỜI CÓ GÀI BẪY
     # ==========================================
-    artisan = db.query(models.Artisan).filter(models.Artisan.id == request.artisan_id).first()
-    
-    # Đề phòng trường hợp Frontend truyền sai ID
-    if not artisan:
-        raise HTTPException(status_code=404, detail="Không tìm thấy Nghệ nhân này trong hệ thống!")
-        
-    artisan_name = artisan.name
-    artisan_bio = artisan.bio if artisan.bio else "Một bậc thầy am hiểu sâu sắc về Tín ngưỡng Thờ Mẫu."
-    core_persona = artisan.style_profile if artisan.style_profile else "Nói chuyện từ tốn, uy nghiêm nhưng gần gũi."
+    # (artisan_name, artisan_bio, core_persona đã được query và extract ở BƯỚC 0)
 
     system_instruction = (
         f"Bạn là {artisan_name}. {artisan_bio}\n\n"
@@ -285,9 +303,9 @@ async def chat_with_artisan_twin(request: ChatRequest, background_tasks: Backgro
                 full_ai_answer += item
                 yield item  # GỬI NGAY cho client (streaming thật)
 
-            # Lưu log sau khi stream xong
+            # Lưu log bằng SESSION MỚI (session cũ đã đóng từ đầu)
             background_tasks.add_task(
-                save_background_logs, db, user_id, session_id, artisan_id,
+                save_background_logs_standalone, user_id, session_id, artisan_id,
                 original_query, search_query, full_ai_answer, saved_context_metadata
             )
         except Exception as e:

@@ -1,0 +1,30 @@
+STRESS TEST REPORT - 2026-03-30 00:25:45
+============================================================
+Total requests: 20 (concurrent)
+OK: 20 | Rate Limited: 0 | Failed: 0
+Wall time: 44.9s
+
+Response times: min=20.9s max=44.9s avg=37.5s
+Throughput: 27 req/min
+
+ALL RESULTS:
+  #1   |  20.9s | T+ 20.9s | OK | 1094 chars
+  #2   |  27.2s | T+ 27.2s | OK | 1303 chars
+  #3   |  30.8s | T+ 30.8s | OK | 2058 chars
+  #4   |  26.5s | T+ 26.5s | OK | 1006 chars
+  #5   |  27.6s | T+ 27.6s | OK | 1836 chars
+  #6   |  28.9s | T+ 28.9s | OK | 2612 chars
+  #7   |  42.4s | T+ 42.4s | OK | 2120 chars
+  #8   |  41.8s | T+ 41.8s | OK | 1914 chars
+  #9   |  39.8s | T+ 39.8s | OK | 1154 chars
+  #10  |  40.7s | T+ 40.7s | OK | 1615 chars
+  #11  |  44.4s | T+ 44.4s | OK | 2173 chars
+  #12  |  40.2s | T+ 40.2s | OK | 1090 chars
+  #13  |  43.5s | T+ 43.5s | OK | 1959 chars
+  #14  |  44.1s | T+ 44.1s | OK | 2014 chars
+  #15  |  42.1s | T+ 42.1s | OK | 1751 chars
+  #16  |  40.9s | T+ 40.9s | OK | 1962 chars
+  #17  |  37.5s | T+ 37.5s | OK | 1113 chars
+  #18  |  43.7s | T+ 43.7s | OK | 1556 chars
+  #19  |  44.9s | T+ 44.9s | OK | 1904 chars
+  #20  |  42.2s | T+ 42.2s | OK | 1160 chars
