@@ -23,34 +23,34 @@ def import_artisans_from_csv(file_path: str):
             csv_reader = csv.DictReader(file)
             
             for row in csv_reader:
-                name = row.get('name', '').strip()
+                # name = row.get('name', '').strip()
                 bio = row.get('bio', '').strip()
                 
                 # Bỏ qua các dòng trống trong file Excel
-                if not name:
-                    continue
+                # if not name:
+                #    continue
                     
                 # ---------------------------------------------------
                 # BƯỚC CHECK TRÙNG LẶP (DUPLICATE CHECK)
                 # ---------------------------------------------------
-                existing_artisan = db.query(models.Artisan).filter(models.Artisan.name == name).first()
+                # existing_artisan = db.query(models.Artisan).filter(models.Artisan.name == name).first()
                 
-                if existing_artisan:
-                    print(f"Bỏ qua: Nghệ nhân '{name}' đã tồn tại trong hệ thống (ID: {existing_artisan.id}).")
-                    skip_count += 1
-                    continue # Dừng xử lý dòng này, nhảy sang dòng tiếp theo
+                # if existing_artisan:
+                    # print(f"Bỏ qua: Nghệ nhân '{name}' đã tồn tại trong hệ thống (ID: {existing_artisan.id}).")
+                    # skip_count += 1
+                    # continue # Dừng xử lý dòng này, nhảy sang dòng tiếp theo
                 # ---------------------------------------------------
 
                 # Nếu chưa có thì mới tạo mới
                 new_artisan = models.Artisan(
-                    name=name,
+                #    name=name,
                     bio=bio,
                     style_profile=None 
                 )
                 
                 db.add(new_artisan)
                 success_count += 1
-                print(f"Đã xếp hàng nạp mới: {name}")
+                print(f"Đã xếp hàng nạp mới")
 
         # Đẩy toàn bộ dữ liệu lên Supabase
         db.commit()
